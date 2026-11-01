@@ -389,7 +389,7 @@ async def test_put_creates_then_updates(
 @pytest.mark.parametrize(
     ("override", "field"),
     [
-        ({"max_wait_minutes": 10}, "max_wait_minutes"),
+        ({"max_wait_minutes": 1441}, "max_wait_minutes"),
         ({"baggage_count": 3}, "baggage_count"),
         ({"baggage_count": -1}, "baggage_count"),
         ({"extra": 1}, "extra"),
@@ -409,6 +409,56 @@ async def test_put_validation(
 
     assert response.status_code == 422
     assert field in response.json()["error"]["details"]["fields"]
+
+
+@pytest.mark.parametrize("minutes", [0, 45, 90, 1440])
+async def test_put_max_wait_minutes_in_range_returned_as_is(
+    api_client: AsyncClient, db_session: AsyncSession, event: Event, minutes: int
+) -> None:
+    trip_id = await trip_at(db_session, event)
+
+    response = await put_app(api_client, db_session, event, body(trip_id, max_wait_minutes=minutes))
+
+    assert response.status_code == 201
+    assert response.json()["max_wait_minutes"] == minutes
+    assert (await get_app(api_client, event)).json()["max_wait_minutes"] == minutes
+
+
+async def test_put_max_wait_minutes_update_to_non_legacy_value(
+    api_client: AsyncClient, db_session: AsyncSession, event: Event
+) -> None:
+    trip_id = await trip_at(db_session, event)
+    await put_app(api_client, db_session, event, body(trip_id, max_wait_minutes=15))
+
+    response = await put_app(api_client, db_session, event, body(trip_id, max_wait_minutes=45))
+
+    assert response.status_code == 200
+    assert response.json()["max_wait_minutes"] == 45
+    assert (await get_app(api_client, event)).json()["max_wait_minutes"] == 45
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        pytest.param(1441, "Не больше 1440", id="above-max"),
+        pytest.param(-1, "Не меньше 0", id="negative"),
+        pytest.param("15", "Неверный тип значения", id="string"),
+        pytest.param(True, "Неверный тип значения", id="bool"),
+        pytest.param(15.0, "Неверный тип значения", id="float"),
+        pytest.param(None, "Неверный тип значения", id="null"),
+    ],
+)
+async def test_put_max_wait_minutes_invalid(
+    api_client: AsyncClient, db_session: AsyncSession, event: Event, value: Any, message: str
+) -> None:
+    trip_id = await trip_at(db_session, event)
+
+    response = await put_app(api_client, db_session, event, body(trip_id, max_wait_minutes=value))
+
+    assert response.status_code == 422
+    error = response.json()["error"]
+    assert error["code"] == "VALIDATION_ERROR"
+    assert error["details"]["fields"] == {"max_wait_minutes": message}
 
 
 async def test_put_missing_fields(

@@ -24,7 +24,7 @@ class Application(TimestampMixin, Base):
     __table_args__ = (
         UniqueConstraint("event_id", "user_id", name="uq_applications_event_user"),
         CheckConstraint("baggage_count BETWEEN 0 AND 2", name="baggage_count_range"),
-        CheckConstraint("max_wait_minutes IN (0, 15, 30)", name="max_wait_minutes_allowed"),
+        CheckConstraint("max_wait_minutes BETWEEN 0 AND 1440", name="max_wait_minutes_range"),
         CheckConstraint(
             "(status = 'assigned') = (transfer_id IS NOT NULL)", name="assigned_has_transfer"
         ),

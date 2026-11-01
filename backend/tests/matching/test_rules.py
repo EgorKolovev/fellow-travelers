@@ -64,6 +64,31 @@ def _same_id_pair() -> list[MatchCandidate]:
             True,
             id="timezones-same-instant",
         ),
+        pytest.param(
+            [cand("10:00", wait=1440, day=1), cand("09:00", wait=0, day=2)],
+            True,
+            id="day-wait-23h-later",
+        ),
+        pytest.param(
+            [cand("10:00", wait=1440, day=1), cand("10:00", wait=0, day=2)],
+            True,
+            id="day-wait-exactly-1440",
+        ),
+        pytest.param(
+            [cand("10:00", wait=1440, day=1), cand("10:01", wait=0, day=2)],
+            False,
+            id="day-wait-exceeded",
+        ),
+        pytest.param(
+            [cand("10:00", wait=45), cand("10:45", wait=0)],
+            True,
+            id="non-legacy-wait-45",
+        ),
+        pytest.param(
+            [cand("10:00", wait=45), cand("10:46", wait=0)],
+            False,
+            id="non-legacy-wait-45-exceeded",
+        ),
         pytest.param(_same_id_pair(), False, id="duplicate-ids"),
         pytest.param([], False, id="empty"),
         pytest.param([cand("10:00", pax=2, bag=2)], True, id="single-ok"),
