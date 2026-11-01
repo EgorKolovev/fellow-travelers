@@ -63,6 +63,7 @@ paths:
       operationId: createEvent
       tags: [events]
       summary: Создать группу мероприятия; создатель становится админом (CAP-02)
+      description: ends_on < starts_on → 422 VALIDATION_ERROR, details.fields.ends_on.
       x-stage: pre-mvp
       requestBody:
         required: true
@@ -101,6 +102,7 @@ paths:
       summary: Изменить настройки группы (только админ)
       description: |
         Все поля необязательны. pre-MVP: правка любых полей без пересчёта трансферов.
+        Итоговая пара дат (с учётом текущих значений): ends_on < starts_on → 422 VALIDATION_ERROR, details.fields.ends_on.
         MVP: изменение точек при назначенных трансферах — по правилам из «Требует уточнения / Изменения»,
         `join_open=false` закрывает вступление.
       x-stage: pre-mvp
@@ -165,7 +167,10 @@ paths:
       operationId: joinByInvite
       tags: [invites]
       summary: Вступить в группу. Идемпотентно — повторный вызов возвращает существующее участие
-      description: Телефон для вступления не требуется (требуется для отправки заявки).
+      description: |
+        Требуется телефон: без телефона и без существующего участия → 403 PHONE_REQUIRED.
+        Действующий участник получает 200 и без телефона (идемпотентность).
+        Порядок проверок: 404 INVITE_NOT_FOUND → уже участник 200 → 409 JOIN_CLOSED → 403 PHONE_REQUIRED → 201.
       x-stage: pre-mvp
       responses:
         '200':
@@ -179,6 +184,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Event' }
         '404': { $ref: '#/components/responses/InviteNotFound' }
+        '403': { $ref: '#/components/responses/Forbidden' }   # PHONE_REQUIRED
         '409': { $ref: '#/components/responses/Conflict' }   # JOIN_CLOSED
         '401': { $ref: '#/components/responses/Unauthorized' }
         '422': { $ref: '#/components/responses/ValidationError' }
@@ -834,7 +840,7 @@ components:
       properties:
         title: { type: string, minLength: 1, maxLength: 200 }
         starts_on: { type: string, format: date }
-        ends_on: { type: string, format: date }
+        ends_on: { type: string, format: date, description: '>= starts_on (с учётом текущего значения, если передано одно поле)' }
         meeting_point: { $ref: '#/components/schemas/Point' }
         pickup_point:
           oneOf:
@@ -889,7 +895,11 @@ components:
       required: [code, link]
       properties:
         code: { type: string, example: K7Q2ZP }
-        link: { type: string, format: uri, example: 'https://t.me/poputchiki_bot?startapp=join_K7Q2ZP' }
+        link:
+          type: string
+          format: uri
+          example: 'https://t.me/poputchiki_bot?start=join_K7Q2ZP'
+          description: 'Ссылка на бота: /start join_<code> → запрос телефона → кнопка мини-приложения ?startapp=join_<code>'
 
     InvitePreview:
       type: object
@@ -991,7 +1001,9 @@ components:
 
     WaitMinutes:
       type: integer
-      enum: [0, 15, 30]
+      minimum: 0
+      maximum: 1440
+      description: Сколько минут участник готов ждать попутчиков, 0–1440 (до 24 часов)
 
     ApplicationInput:
       type: object
