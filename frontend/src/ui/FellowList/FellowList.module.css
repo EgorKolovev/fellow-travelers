@@ -67,8 +67,7 @@
   height: 32px;
   border-radius: 50%;
   background: var(--surface-low);
-  font-size: 14px;
-  line-height: 1;
+  color: var(--text-accent);
   text-decoration: none;
 }
 

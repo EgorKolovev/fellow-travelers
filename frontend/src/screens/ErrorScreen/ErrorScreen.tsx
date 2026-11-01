@@ -1,5 +1,7 @@
+import { ArrowRight } from 'lucide-react';
 import { Button } from '../../ui/Button/Button';
 import { EmptyState } from '../../ui/EmptyState/EmptyState';
+import { Icon } from '../../ui/Icon/Icon';
 import { Screen } from '../../ui/Screen/Screen';
 import styles from './ErrorScreen.module.css';
 
@@ -11,7 +13,7 @@ interface Props {
   action?: { label: string; onClick: () => void };
 }
 
-/** Карточка ошибки без экрана — для блока внутри экрана (вкладка): 👀, текст и действие. */
+/** Карточка ошибки без экрана — для блока внутри экрана (вкладка): иконка, текст и действие. */
 export function ErrorCard({
   title = 'Не удалось загрузить страницу',
   text,
@@ -26,7 +28,7 @@ export function ErrorCard({
       </div>
       {button && (
         <div className={styles.footer}>
-          <Button onClick={button.onClick} arrow="→">
+          <Button onClick={button.onClick} arrow={<Icon icon={ArrowRight} />}>
             {button.label}
           </Button>
         </div>
@@ -35,7 +37,7 @@ export function ErrorCard({
   );
 }
 
-/** Страница ошибки: карточка 👀 с заголовком и текстом, «Повторить попытку →». */
+/** Страница ошибки: карточка с иконкой, заголовком и текстом, «Повторить попытку». */
 export function ErrorScreen(props: Props) {
   return (
     <Screen center>

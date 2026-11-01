@@ -1,8 +1,10 @@
+import { ArrowRight } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { isUnauthorized } from '../../api/errors';
 import { fetchMe, meQueryKey } from '../../api/me';
 import { Button } from '../../ui/Button/Button';
+import { Icon } from '../../ui/Icon/Icon';
 import { Screen } from '../../ui/Screen/Screen';
 import { ScreenHeader } from '../../ui/ScreenHeader/ScreenHeader';
 import { Spinner } from '../../ui/Spinner/Spinner';
@@ -56,7 +58,7 @@ export function PhoneGate({ children }: { children: ReactNode }) {
         <p className={styles.card}>{TEXT}</p>
       </div>
       <div className={styles.footer} aria-busy={busy || undefined}>
-        <Button arrow="→" disabled={sharing} onClick={() => void share()}>
+        <Button arrow={<Icon icon={ArrowRight} />} disabled={sharing} onClick={() => void share()}>
           Поделиться номером
         </Button>
         <Button variant="secondary" disabled={busy} onClick={() => void refetch()}>

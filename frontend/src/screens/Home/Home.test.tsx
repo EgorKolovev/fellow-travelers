@@ -105,24 +105,25 @@ describe('Home', () => {
     expect(screen.getByTestId('location')).toHaveTextContent(`/events/${adminOnly.id}/admin`);
   });
 
-  it('«Управляю»: админ-участник ведёт в управление группой, иконка 🛠️', async () => {
+  it('«Управляю»: админ-участник ведёт в управление группой, иконка-гаечный ключ', async () => {
     const both: EventSummary = { ...participant, is_admin: true };
     fetchMyEvents.mockResolvedValue([both]);
     renderHome('/?filter=admin');
 
     const card = await screen.findByRole('button', { name: /Слёт в Геленджике/ });
-    expect(card).toHaveTextContent('🛠️');
+    // Иконка декоративная (aria-hidden): проверяем по классу lucide.
+    expect(card.querySelector('.lucide-wrench')).not.toBeNull();
     await userEvent.click(card);
     expect(screen.getByTestId('location')).toHaveTextContent(`/events/${both.id}/admin`);
   });
 
-  it('«Все»: админ-участник ведёт в «Мою поездку», иконка 🧳', async () => {
+  it('«Все»: админ-участник ведёт в «Мою поездку», иконка-чемодан', async () => {
     const both: EventSummary = { ...participant, is_admin: true };
     fetchMyEvents.mockResolvedValue([both]);
     renderHome();
 
     const card = await screen.findByRole('button', { name: /Слёт в Геленджике/ });
-    expect(card).toHaveTextContent('🧳');
+    expect(card.querySelector('.lucide-luggage')).not.toBeNull();
     await userEvent.click(card);
     expect(screen.getByTestId('location')).toHaveTextContent(new RegExp(`^/events/${both.id}$`));
   });

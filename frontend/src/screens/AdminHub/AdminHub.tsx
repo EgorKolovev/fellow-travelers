@@ -1,9 +1,11 @@
+import { Luggage, Plane, Send, Settings } from 'lucide-react';
 import { useNavigate, useParams, useSearchParams } from 'react-router';
 import { isUnauthorized } from '../../api/errors';
 import { useEvent, useJoinAsParticipant, useTrips } from '../../api/hooks';
 import { formatDateRange, plural } from '../../lib/datetime';
 import { useBack, useReplaceSearch } from '../../lib/useBack';
 import { Button } from '../../ui/Button/Button';
+import { Icon } from '../../ui/Icon/Icon';
 import { Option } from '../../ui/Option/Option';
 import { Screen } from '../../ui/Screen/Screen';
 import { ScreenHeader } from '../../ui/ScreenHeader/ScreenHeader';
@@ -89,7 +91,7 @@ export function AdminHub() {
           {event.is_participant && (
             <li>
               <Option
-                leading="🧳"
+                leading={<Icon icon={Luggage} size={24} />}
                 title="Моя поездка"
                 subtitle="Ваша заявка и попутчики"
                 onClick={go('')}
@@ -98,7 +100,7 @@ export function AdminHub() {
           )}
           <li>
             <Option
-              leading="📨"
+              leading={<Icon icon={Send} size={24} />}
               title="Приглашение"
               subtitle="Код и ссылка для участников"
               onClick={go('/admin/invite')}
@@ -106,7 +108,7 @@ export function AdminHub() {
           </li>
           <li>
             <Option
-              leading="✈️"
+              leading={<Icon icon={Plane} size={24} />}
               title="Рейсы группы"
               subtitle={tripsSubtitle}
               onClick={go('/admin/trips')}
@@ -114,7 +116,7 @@ export function AdminHub() {
           </li>
           <li>
             <Option
-              leading="⚙️"
+              leading={<Icon icon={Settings} size={24} />}
               title="Настройки группы"
               subtitle="Точки, инструкция, вступление"
               onClick={go('/admin/settings')}

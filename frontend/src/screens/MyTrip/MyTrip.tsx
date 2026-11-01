@@ -1,3 +1,4 @@
+import { ArrowRight, Pencil, Settings, X } from 'lucide-react';
 import { useCallback, useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
 import { isUnauthorized } from '../../api/errors';
@@ -16,6 +17,7 @@ import { useNow } from '../../lib/useNow';
 import { Button } from '../../ui/Button/Button';
 import { ConfirmScreen } from '../../ui/ConfirmScreen/ConfirmScreen';
 import { FlightInfo } from '../../ui/FlightInfo/FlightInfo';
+import { Icon } from '../../ui/Icon/Icon';
 import { Option } from '../../ui/Option/Option';
 import { Screen } from '../../ui/Screen/Screen';
 import { ScreenHeader } from '../../ui/ScreenHeader/ScreenHeader';
@@ -146,7 +148,7 @@ export function MyTrip() {
 
   const adminLink = loadedEvent.is_admin && (
     <Option
-      leading="⚙️"
+      leading={<Icon icon={Settings} size={24} />}
       title="Управление группой"
       onClick={() => void navigate(`/events/${eventId}/admin`)}
     />
@@ -193,7 +195,7 @@ export function MyTrip() {
           {adminLink}
           <section className={styles.card}>
             <p className={styles.text}>Заполните заявку — мы подберём попутчиков</p>
-            <Button arrow="→" onClick={() => void navigate(apply)}>
+            <Button arrow={<Icon icon={ArrowRight} />} onClick={() => void navigate(apply)}>
               Заполнить заявку
             </Button>
           </section>
@@ -245,13 +247,18 @@ export function MyTrip() {
       {!departed && (
         <div className={styles.footer}>
           {errorLine}
-          <Button variant="secondary" icon="✏️" onClick={editData} disabled={pending}>
+          <Button
+            variant="secondary"
+            icon={<Icon icon={Pencil} />}
+            onClick={editData}
+            disabled={pending}
+          >
             Изменить данные
           </Button>
           {canGoSolo && (
             <Button
               variant="danger"
-              icon="❌"
+              icon={<Icon icon={X} />}
               onClick={() => setConfirm('goSolo')}
               disabled={pending}
             >

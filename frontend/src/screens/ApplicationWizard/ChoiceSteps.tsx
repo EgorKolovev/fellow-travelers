@@ -1,8 +1,19 @@
+import {
+  ArrowLeft,
+  ArrowRight,
+  Backpack,
+  Luggage,
+  User,
+  Users,
+  UserX,
+  type LucideIcon,
+} from 'lucide-react';
 import { useState } from 'react';
 import type { WaitMinutes } from '../../api/types';
 import { formatWait } from '../../lib/format';
 import { Button } from '../../ui/Button/Button';
 import { Form, FormFields, FormFooter } from '../../ui/Form/Form';
+import { Icon } from '../../ui/Icon/Icon';
 import { NumberInput } from '../../ui/NumberInput/NumberInput';
 import { Option } from '../../ui/Option/Option';
 import { Screen } from '../../ui/Screen/Screen';
@@ -20,15 +31,15 @@ import { WizardHeader } from './WizardHeader';
 
 const COMPANION_OPTIONS: {
   choice: CompanionChoice;
-  emoji: string;
+  icon: LucideIcon;
   title: string;
   subtitle?: string;
 }[] = [
-  { choice: 'alone', emoji: '👤', title: 'Нет, лечу один' },
-  { choice: 'plusOne', emoji: '👥', title: 'Да, со мной +1' },
+  { choice: 'alone', icon: User, title: 'Нет, лечу один' },
+  { choice: 'plusOne', icon: Users, title: 'Да, со мной +1' },
   {
     choice: 'noSeek',
-    emoji: '🙅',
+    icon: UserX,
     title: 'Не искать попутчиков',
     subtitle: 'Если вместе с вами летит больше 2 человек',
   },
@@ -44,10 +55,10 @@ export function CompanionStep({ onChoose }: { onChoose: (choice: CompanionChoice
         subtitle="Учтём при подборе попутчиков, чтобы все влезли в такси"
       />
       <ul className={styles.options}>
-        {COMPANION_OPTIONS.map(({ choice, emoji, title, subtitle }) => (
+        {COMPANION_OPTIONS.map(({ choice, icon, title, subtitle }) => (
           <li key={choice}>
             <Option
-              leading={emoji}
+              leading={<Icon icon={icon} size={24} />}
               title={title}
               subtitle={subtitle}
               onClick={() => onChoose(choice)}
@@ -75,7 +86,7 @@ export function BaggageStep({
       <ul className={styles.options}>
         <li>
           <Option
-            leading="🎒"
+            leading={<Icon icon={Backpack} size={24} />}
             title="Только ручная кладь"
             subtitle="Сразу выйду из зоны прилёта"
             onClick={onHandLuggage}
@@ -83,7 +94,7 @@ export function BaggageStep({
         </li>
         <li>
           <Option
-            leading="🧳"
+            leading={<Icon icon={Luggage} size={24} />}
             title="Лечу с багажом"
             subtitle="Буду ждать выдачу багажа"
             onClick={onWithBaggage}
@@ -134,17 +145,21 @@ export function BaggageCountStep({
               В одно такси помещается не больше двух чемоданов. Если у вас больше — выберите «Не
               искать попутчиков»
             </p>
-            <Button variant="secondary" icon="🙅" onClick={() => onNoSeek(count)}>
+            <Button
+              variant="secondary"
+              icon={<Icon icon={UserX} />}
+              onClick={() => onNoSeek(count)}
+            >
               Не искать попутчиков
             </Button>
           </>
         )}
       </div>
       <div className={styles.footer}>
-        <Button arrow="→" onClick={() => onNext(count)}>
+        <Button arrow={<Icon icon={ArrowRight} />} onClick={() => onNext(count)}>
           Далее
         </Button>
-        <Button variant="secondary" icon="←" onClick={onBack}>
+        <Button variant="secondary" icon={<Icon icon={ArrowLeft} />} onClick={onBack}>
           Назад
         </Button>
       </div>
@@ -233,7 +248,7 @@ export function WaitStep({ value, onChoose }: WaitStepProps) {
             )}
           </FormFields>
           <FormFooter>
-            <Button type="submit" arrow="→">
+            <Button type="submit" arrow={<Icon icon={ArrowRight} />}>
               Далее
             </Button>
           </FormFooter>

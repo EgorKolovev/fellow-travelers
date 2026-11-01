@@ -1,8 +1,10 @@
+import { ArrowRight } from 'lucide-react';
 import { useNavigate } from 'react-router';
 import { isApiErrorCode, isUnauthorized } from '../../api/errors';
 import { useReplace } from '../../lib/useBack';
 import { Button } from '../../ui/Button/Button';
 import { EmptyState } from '../../ui/EmptyState/EmptyState';
+import { Icon } from '../../ui/Icon/Icon';
 import { Screen } from '../../ui/Screen/Screen';
 import { ErrorScreen, OpenInTelegramScreen } from './ErrorScreen';
 import styles from './ErrorScreen.module.css';
@@ -14,7 +16,7 @@ export function NotAdminScreen({ eventId }: { eventId: string }) {
     <Screen center>
       <EmptyState title="Управлять группой может только организатор" />
       <div className={styles.footer}>
-        <Button arrow="→" onClick={() => replace(`/events/${eventId}`)}>
+        <Button arrow={<Icon icon={ArrowRight} />} onClick={() => replace(`/events/${eventId}`)}>
           Моя поездка
         </Button>
       </div>

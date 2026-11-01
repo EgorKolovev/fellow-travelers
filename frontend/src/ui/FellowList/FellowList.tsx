@@ -24,7 +24,7 @@ interface Props {
   'aria-label'?: string;
 }
 
-/** Список людей с аватаром, подписью, контактами текстом и кнопками 💬 / 📞. */
+/** Список людей с аватаром, подписью, контактами текстом и кнопками «Написать» / «Позвонить». */
 export function FellowList({ items, 'aria-label': ariaLabel }: Props) {
   return (
     <ul className={styles.list} aria-label={ariaLabel}>

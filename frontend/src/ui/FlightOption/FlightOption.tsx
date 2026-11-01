@@ -1,6 +1,8 @@
+import { Plane } from 'lucide-react';
 import type { components } from '../../api/schema';
 import { arrivalDayShift, formatDayMonth, formatTime } from '../../lib/datetime';
 import { formatFlightNumber } from '../../lib/format';
+import { Icon } from '../Icon/Icon';
 import { Option } from '../Option/Option';
 import styles from './FlightOption.module.css';
 
@@ -36,7 +38,7 @@ export function FlightOption({ trip, onClick, disabled, withDate = false }: Prop
   const date = formatDayMonth(trip.scheduled_departure, trip.departure_location.timezone);
   return (
     <Option
-      leading="✈️"
+      leading={<Icon icon={Plane} size={24} />}
       title={withDate ? `${number} · ${date}` : number}
       subtitle={<span className={styles.route}>{flightRoute(trip)}</span>}
       onClick={onClick}

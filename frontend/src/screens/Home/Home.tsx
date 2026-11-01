@@ -1,3 +1,4 @@
+import { ArrowRight, Luggage, Wrench } from 'lucide-react';
 import { useNavigate, useSearchParams } from 'react-router';
 import { isUnauthorized } from '../../api/errors';
 import { useMyEvents } from '../../api/hooks';
@@ -6,6 +7,7 @@ import { formatDateRange } from '../../lib/datetime';
 import { eventStatusLabel } from '../../lib/status';
 import { Button } from '../../ui/Button/Button';
 import { EmptyState } from '../../ui/EmptyState/EmptyState';
+import { Icon } from '../../ui/Icon/Icon';
 import { Option } from '../../ui/Option/Option';
 import { Screen } from '../../ui/Screen/Screen';
 import { ScreenHeader } from '../../ui/ScreenHeader/ScreenHeader';
@@ -42,7 +44,7 @@ export function Home() {
 
   const footer = (
     <div className={styles.footer}>
-      <Button arrow="→" onClick={() => void navigate('/join')}>
+      <Button arrow={<Icon icon={ArrowRight} />} onClick={() => void navigate('/join')}>
         Ввести код приглашения
       </Button>
       <Button variant="secondary" onClick={() => void navigate('/events/new')}>
@@ -106,7 +108,7 @@ export function Home() {
               {visible.map((event) => (
                 <li key={event.id}>
                   <Option
-                    leading={asAdmin(event, filter) ? '🛠️' : '🧳'}
+                    leading={<Icon icon={asAdmin(event, filter) ? Wrench : Luggage} size={24} />}
                     title={event.title}
                     subtitle={`${formatDateRange(event.starts_on, event.ends_on)} · ${eventStatusLabel(event)}`}
                     onClick={() =>

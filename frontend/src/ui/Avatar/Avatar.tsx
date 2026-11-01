@@ -1,5 +1,7 @@
+import { UserRound } from 'lucide-react';
 import { useState } from 'react';
 import { isSafeExternalUrl } from '../../lib/links';
+import { Icon } from '../Icon/Icon';
 import styles from './Avatar.module.css';
 
 interface Props {
@@ -34,11 +36,10 @@ export function Avatar({ src, loading = false, size = 128, decorative = false }:
         !loading && (
           <span
             className={styles.placeholder}
-            style={size === 128 ? undefined : { fontSize: size / 2 }}
             role={decorative ? undefined : 'img'}
             aria-label={decorative ? undefined : 'Нет фото'}
           >
-            🤷🏻
+            <Icon icon={UserRound} size={size / 2} strokeWidth={size >= 64 ? 1.25 : 1.75} />
           </span>
         )
       )}

@@ -18,8 +18,8 @@
 }
 
 .placeholder {
-  font-size: 64px;
-  line-height: 1;
+  display: flex;
+  color: var(--text-pale);
 }
 
 .loading {

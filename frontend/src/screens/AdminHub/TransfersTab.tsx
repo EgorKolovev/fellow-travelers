@@ -1,7 +1,9 @@
+import { CarTaxiFront } from 'lucide-react';
 import { useAdminTransfers } from '../../api/hooks';
 import type { Transfer } from '../../api/types';
 import { plural } from '../../lib/datetime';
 import { EmptyState } from '../../ui/EmptyState/EmptyState';
+import { Icon } from '../../ui/Icon/Icon';
 import { Option } from '../../ui/Option/Option';
 import { Skeleton } from '../../ui/Skeleton/Skeleton';
 import { sortTransfers, transferNumbers, transferState, type TransferState } from './admin';
@@ -30,7 +32,7 @@ function TransferCard({
   const names = transfer.members.map((m) => m.contact.first_name).join(', ');
   return (
     <Option
-      leading="🚕"
+      leading={<Icon icon={CarTaxiFront} size={24} />}
       title={`Трансфер ${number} · ${transfer.passengers_total} ${plural(transfer.passengers_total, PEOPLE)}`}
       subtitle={
         <>
