@@ -30,7 +30,7 @@ def generate_invite_code() -> str:
 
 
 def build_invite_link(code: str) -> str:
-    return f"https://t.me/{get_settings().bot_username}?startapp=join_{code}"
+    return f"https://t.me/{get_settings().bot_username}?start=join_{code}"
 
 
 async def list_my_events(session: AsyncSession, user: User) -> list[EventListItem]:

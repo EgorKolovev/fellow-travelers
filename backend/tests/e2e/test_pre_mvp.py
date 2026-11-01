@@ -105,7 +105,7 @@ async def create_event(client: AsyncClient, title: str, **extra: Any) -> tuple[s
         client, "GET", "/events/{event_id}/invite", ADMIN, expect=200, event_id=event_id
     )
     code = str(invite.json()["code"])
-    assert invite.json()["link"].endswith(f"startapp=join_{code}")
+    assert invite.json()["link"].endswith(f"?start=join_{code}")
     return event_id, code
 
 
@@ -289,10 +289,20 @@ async def test_pre_mvp_full_scenario(api_client: AsyncClient, db_session: AsyncS
     assert len(trips.json()) == 4
 
     # Шаг 2. Участники передают телефон боту, открывают приглашение, вступают, видят группу.
-    # Дима телефон пока не передаёт.
+    # Дима телефон пока не передаёт: превью доступно, вступить нельзя.
     for who in (ALICE, BORIS, VERA, GLEB):
         await join(c, s, who, code)
     await call(c, "GET", "/invites/{code}", DIMA, expect=200, code=code.lower())
+    denied = await call(c, "POST", "/invites/{code}/join", DIMA, expect=403, code=code.lower())
+    assert denied.json()["error"]["code"] == "PHONE_REQUIRED"
+    preview = await call(c, "GET", "/invites/{code}", DIMA, expect=200, code=code)
+    assert preview.json()["already_member"] is False
+    assert (await call(c, "GET", "/me", DIMA, expect=200)).json()["has_phone"] is False
+
+    # Шаг 2. После передачи телефона боту Дима вступает.
+    await share_phone(s, DIMA)
+    me = (await call(c, "GET", "/me", DIMA, expect=200)).json()
+    assert (me["has_phone"], me["phone"]) == (True, DIMA.phone)
     joined = await call(c, "POST", "/invites/{code}/join", DIMA, expect=201, code=code.lower())
     assert joined.json()["id"] == event_id
     for who in (ALICE, BORIS, VERA, GLEB, DIMA):
@@ -301,15 +311,7 @@ async def test_pre_mvp_full_scenario(api_client: AsyncClient, db_session: AsyncS
             (event_id, False, True)
         ]
         assert events[0]["my_application_status"] is None
-
-    # Шаг 2. Дима без телефона не может подать заявку; после передачи телефона — может.
-    denied = await apply(c, s, event_id, DIMA, trip_g, expect=403)
-    assert denied.json()["error"]["code"] == "PHONE_REQUIRED"
     await call(c, "GET", "/events/{event_id}/my-application", DIMA, expect=404, event_id=event_id)
-    assert (await call(c, "GET", "/me", DIMA, expect=200)).json()["has_phone"] is False
-    await share_phone(s, DIMA)
-    me = (await call(c, "GET", "/me", DIMA, expect=200)).json()
-    assert (me["has_phone"], me["phone"]) == (True, DIMA.phone)
 
     # Шаг 3. А (SVO 10:00, ждёт 15) и Б (SVO 10:10, ждёт 0) собираются в одну пару.
     first = await apply(c, s, event_id, ALICE, trip_a, wait=15)
