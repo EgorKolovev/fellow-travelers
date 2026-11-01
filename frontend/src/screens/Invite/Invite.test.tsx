@@ -1,4 +1,4 @@
-import { act, screen } from '@testing-library/react';
+import { act, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, NoInitDataError } from '../../api/errors';
@@ -9,11 +9,19 @@ import { Invite } from './Invite';
 
 const fetchInvitePreview = vi.hoisted(() => vi.fn());
 const joinByInvite = vi.hoisted(() => vi.fn());
+const fetchMe = vi.hoisted(() => vi.fn());
+const askForContact = vi.hoisted(() => vi.fn());
 
 vi.mock('../../api/invites', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../api/invites')>()),
   fetchInvitePreview,
   joinByInvite,
+}));
+vi.mock('../../api/me', () => ({ fetchMe, meQueryKey: ['me'] }));
+vi.mock('../../lib/telegram', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../lib/telegram')>()),
+  canRequestContact: () => true,
+  askForContact,
 }));
 
 const EVENT_ID = '44444444-4444-4444-8444-444444444444';
@@ -65,6 +73,8 @@ describe('Invite', () => {
   beforeEach(() => {
     fetchInvitePreview.mockReset();
     joinByInvite.mockReset();
+    fetchMe.mockReset();
+    askForContact.mockReset();
   });
 
   it('обычное: название, даты, пояснение и «Вступить»; код — в верхнем регистре', async () => {
@@ -165,6 +175,40 @@ describe('Invite', () => {
 
     await clickJoin();
     expect(await screen.findByRole('alert')).toHaveTextContent('Сервер недоступен');
+    expect(screen.getByRole('button', { name: /Вступить/ })).toBeEnabled();
+  });
+
+  it('PHONE_REQUIRED → «Поделиться номером»; телефон появился — вступление повторяется', async () => {
+    fetchInvitePreview.mockResolvedValue(preview);
+    joinByInvite
+      .mockRejectedValueOnce(new ApiError(403, 'PHONE_REQUIRED', 'Нужен телефон'))
+      .mockResolvedValue(event);
+    fetchMe.mockResolvedValue({ has_phone: true, phone: '+79122042912' });
+    renderInvite();
+
+    await clickJoin();
+    expect(await screen.findByRole('alert')).toHaveTextContent(/поделитесь номером телефона/);
+    await userEvent.click(screen.getByRole('button', { name: 'Поделиться номером' }));
+    expect(askForContact).toHaveBeenCalled();
+
+    // Опрос /me — раз в секунду; после первой удачной попытки вступление уходит снова.
+    expect(await screen.findByTestId('location', {}, { timeout: 3000 })).toHaveTextContent(
+      `/events/${EVENT_ID}`,
+    );
+    expect(joinByInvite).toHaveBeenCalledTimes(2);
+  });
+
+  it('PHONE_REQUIRED, телефона так и нет — вступление не повторяется', async () => {
+    fetchInvitePreview.mockResolvedValue(preview);
+    joinByInvite.mockRejectedValue(new ApiError(403, 'PHONE_REQUIRED', 'Нужен телефон'));
+    fetchMe.mockResolvedValue({ has_phone: false, phone: null });
+    renderInvite();
+
+    await clickJoin();
+    const share = await screen.findByRole('button', { name: 'Поделиться номером' });
+    await userEvent.click(share);
+    await waitFor(() => expect(fetchMe).toHaveBeenCalled(), { timeout: 3000 });
+    expect(joinByInvite).toHaveBeenCalledTimes(1);
     expect(screen.getByRole('button', { name: /Вступить/ })).toBeEnabled();
   });
 

@@ -1,3 +1,4 @@
+import { Send } from 'lucide-react';
 import { useId } from 'react';
 import type { ParticipantsFilters } from '../../api/admin';
 import { useAdminParticipants, useAdminTransfers } from '../../api/hooks';
@@ -6,6 +7,7 @@ import { formatDayMonth, plural } from '../../lib/datetime';
 import { formatFlightNumber } from '../../lib/format';
 import { Button } from '../../ui/Button/Button';
 import { EmptyState } from '../../ui/EmptyState/EmptyState';
+import { Icon } from '../../ui/Icon/Icon';
 import { Skeleton } from '../../ui/Skeleton/Skeleton';
 import { sortParticipants, STATUS_FILTERS, transferNumbers } from './admin';
 import styles from './AdminTabs.module.css';
@@ -153,7 +155,7 @@ export function ParticipantsTab({
         ) : (
           <>
             <EmptyState title="Пока никто не вступил" text="Отправьте приглашение участникам" />
-            <Button variant="secondary" icon="📨" onClick={onInvite}>
+            <Button variant="secondary" icon={<Icon icon={Send} />} onClick={onInvite}>
               Приглашение
             </Button>
           </>

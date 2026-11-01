@@ -112,6 +112,31 @@ describe('CreateEvent', () => {
     expect(createEvent).not.toHaveBeenCalled();
   });
 
+  it('окончание раньше начала — подсказка сразу, кнопка заблокирована', async () => {
+    createEvent.mockResolvedValue(makeEvent());
+    renderCreate();
+    const user = userEvent.setup();
+    const starts = screen.getByLabelText('Начало');
+    const ends = screen.getByLabelText('Окончание');
+
+    await user.type(starts, '2026-11-14');
+    expect(ends).toHaveAttribute('min', '2026-11-14');
+    await user.type(ends, '2026-11-12');
+    expect(ends).toHaveAccessibleDescription('Дата окончания раньше даты начала');
+    expect(ends).toHaveAttribute('aria-invalid', 'true');
+    expect(submit()).toBeDisabled();
+    // Остальные ошибки — только после отправки.
+    expect(screen.getByLabelText('Название')).not.toHaveAttribute('aria-invalid');
+    await user.click(submit());
+    expect(createEvent).not.toHaveBeenCalled();
+
+    await user.clear(ends);
+    await user.type(ends, '2026-11-15');
+    expect(ends).not.toHaveAttribute('aria-invalid');
+    expect(screen.queryByText('Дата окончания раньше даты начала')).not.toBeInTheDocument();
+    expect(submit()).toBeEnabled();
+  });
+
   it('422: details.fields — под поля, message — под кнопку', async () => {
     createEvent.mockRejectedValue(
       new ApiError(422, 'VALIDATION_ERROR', 'Проверьте введённые данные', {

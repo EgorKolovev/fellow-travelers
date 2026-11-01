@@ -1,3 +1,4 @@
+import { ArrowRight } from 'lucide-react';
 import { useNavigate, useParams } from 'react-router';
 import { useEvent, useTrips } from '../../api/hooks';
 import type { Trip } from '../../api/types';
@@ -5,6 +6,7 @@ import { useBack } from '../../lib/useBack';
 import { Button } from '../../ui/Button/Button';
 import { EmptyState } from '../../ui/EmptyState/EmptyState';
 import { FlightOption } from '../../ui/FlightOption/FlightOption';
+import { Icon } from '../../ui/Icon/Icon';
 import { Screen } from '../../ui/Screen/Screen';
 import { ScreenHeader } from '../../ui/ScreenHeader/ScreenHeader';
 import { Skeleton } from '../../ui/Skeleton/Skeleton';
@@ -33,7 +35,7 @@ export function Trips() {
   );
   const footer = (
     <div className={styles.footer}>
-      <Button arrow="→" onClick={() => void navigate(`${base}/new`)}>
+      <Button arrow={<Icon icon={ArrowRight} />} onClick={() => void navigate(`${base}/new`)}>
         Добавить рейс
       </Button>
     </div>

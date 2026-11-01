@@ -44,3 +44,10 @@
   padding: 20px 0 0;
   list-style: none;
 }
+
+/* «Часы» и «Минуты» в одну строку. */
+.waitFields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}

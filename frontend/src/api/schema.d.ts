@@ -47,7 +47,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Создать группу мероприятия; создатель становится админом (CAP-02) */
+        /**
+         * Создать группу мероприятия; создатель становится админом (CAP-02)
+         * @description ends_on < starts_on → 422 VALIDATION_ERROR, details.fields.ends_on.
+         */
         post: operations["createEvent"];
         delete?: never;
         options?: never;
@@ -74,6 +77,7 @@ export interface paths {
         /**
          * Изменить настройки группы (только админ)
          * @description Все поля необязательны. pre-MVP: правка любых полей без пересчёта трансферов.
+         *     Итоговая пара дат (с учётом текущих значений): ends_on < starts_on → 422 VALIDATION_ERROR, details.fields.ends_on.
          *     MVP: изменение точек при назначенных трансферах — по правилам из «Требует уточнения / Изменения»,
          *     `join_open=false` закрывает вступление.
          */
@@ -133,7 +137,9 @@ export interface paths {
         put?: never;
         /**
          * Вступить в группу. Идемпотентно — повторный вызов возвращает существующее участие
-         * @description Телефон для вступления не требуется (требуется для отправки заявки).
+         * @description Требуется телефон: без телефона и без существующего участия → 403 PHONE_REQUIRED.
+         *     Действующий участник получает 200 и без телефона (идемпотентность).
+         *     Порядок проверок: 404 INVITE_NOT_FOUND → уже участник 200 → 409 JOIN_CLOSED → 403 PHONE_REQUIRED → 201.
          */
         post: operations["joinByInvite"];
         delete?: never;
@@ -545,7 +551,10 @@ export interface components {
             title?: string;
             /** Format: date */
             starts_on?: string;
-            /** Format: date */
+            /**
+             * Format: date
+             * @description >= starts_on (с учётом текущего значения, если передано одно поле)
+             */
             ends_on?: string;
             meeting_point?: components["schemas"]["Point"];
             pickup_point?: components["schemas"]["Point"] | null;
@@ -593,7 +602,8 @@ export interface components {
             code: string;
             /**
              * Format: uri
-             * @example https://t.me/poputchiki_bot?startapp=join_K7Q2ZP
+             * @description Ссылка на бота: /start join_<code> → запрос телефона → кнопка мини-приложения ?startapp=join_<code>
+             * @example https://t.me/poputchiki_bot?start=join_K7Q2ZP
              */
             link: string;
         };
@@ -720,8 +730,8 @@ export interface components {
         };
         /** @enum {string} */
         ApplicationStatus: "searching" | "assigned" | "solo" | "cancelled";
-        /** @enum {integer} */
-        WaitMinutes: 0 | 15 | 30;
+        /** @description Сколько минут участник готов ждать попутчиков, 0–1440 (до 24 часов) */
+        WaitMinutes: number;
         ApplicationInput: {
             /**
              * Format: uuid
@@ -1133,6 +1143,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["InviteNotFound"];
             409: components["responses"]["Conflict"];
             422: components["responses"]["ValidationError"];

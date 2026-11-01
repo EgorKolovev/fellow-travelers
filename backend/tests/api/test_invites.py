@@ -204,13 +204,60 @@ async def test_joined_group_visible_in_my_events_and_event(
     assert detail.json()["is_participant"] is True
 
 
-async def test_join_without_phone(api_client: AsyncClient, db_session: AsyncSession) -> None:
-    no_phone = await make_user(db_session, telegram_id=555, first_name="NoPhone")
+async def test_join_without_phone_is_forbidden(
+    api_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    no_phone = await make_user(db_session, telegram_id=555, first_name="NoPhone", phone=None)
     event = await make_event(db_session, invite_code=CODE)
 
     response = await api_client.post(f"/invites/{CODE}/join", headers=auth_headers(555))
 
-    assert response.status_code == 201
+    assert response.status_code == 403
     assert_contract(response, "POST", "/invites/{code}/join")
-    assert response.json()["id"] == str(event.id)
-    assert no_phone.phone is None
+    assert response.json()["error"]["code"] == "PHONE_REQUIRED"
+    assert await count_memberships(db_session, event.id, no_phone.id) == 0
+    preview = await api_client.get(f"/invites/{CODE}", headers=auth_headers(555))
+    assert preview.status_code == 200
+    assert_contract(preview, "GET", "/invites/{code}")
+    assert preview.json()["already_member"] is False
+
+
+async def test_join_without_phone_but_already_member(
+    api_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    no_phone = await make_user(db_session, telegram_id=555, first_name="NoPhone", phone=None)
+    event = await make_event(db_session, invite_code=CODE)
+    await make_membership(db_session, event_id=event.id, user_id=no_phone.id)
+
+    response = await api_client.post(f"/invites/{CODE}/join", headers=auth_headers(555))
+
+    assert response.status_code == 200
+    assert_contract(response, "POST", "/invites/{code}/join")
+    assert response.json()["is_participant"] is True
+    assert await count_memberships(db_session, event.id, no_phone.id) == 1
+
+
+async def test_join_closed_without_phone_reports_join_closed(
+    api_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    no_phone = await make_user(db_session, telegram_id=555, first_name="NoPhone", phone=None)
+    event = await make_event(db_session, invite_code=CODE, join_open=False)
+
+    response = await api_client.post(f"/invites/{CODE}/join", headers=auth_headers(555))
+
+    assert response.status_code == 409
+    assert_contract(response, "POST", "/invites/{code}/join")
+    assert response.json()["error"]["code"] == "JOIN_CLOSED"
+    assert await count_memberships(db_session, event.id, no_phone.id) == 0
+
+
+async def test_join_unknown_code_without_phone_is_not_found(
+    api_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    await make_user(db_session, telegram_id=555, first_name="NoPhone", phone=None)
+
+    response = await api_client.post("/invites/ZZZZZZ/join", headers=auth_headers(555))
+
+    assert response.status_code == 404
+    assert_contract(response, "POST", "/invites/{code}/join")
+    assert response.json()["error"]["code"] == "INVITE_NOT_FOUND"

@@ -1,16 +1,21 @@
-import { useEffect } from 'react';
+import { ArrowRight } from 'lucide-react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useCallback, useEffect } from 'react';
 import { useNavigate, useParams } from 'react-router';
 import { isApiErrorCode, isUnauthorized } from '../../api/errors';
 import { useInvitePreview, useJoin } from '../../api/hooks';
+import { fetchMe, meQueryKey } from '../../api/me';
 import { formatDateRange } from '../../lib/datetime';
 import { isInviteCode } from '../../lib/inviteCode';
 import { useBack, useIsFirstEntry, useReplace } from '../../lib/useBack';
 import { Button } from '../../ui/Button/Button';
 import { EmptyState } from '../../ui/EmptyState/EmptyState';
+import { Icon } from '../../ui/Icon/Icon';
 import { Screen } from '../../ui/Screen/Screen';
 import { ScreenHeader } from '../../ui/ScreenHeader/ScreenHeader';
 import { Skeleton } from '../../ui/Skeleton/Skeleton';
 import { ErrorScreen, OpenInTelegramScreen } from '../ErrorScreen/ErrorScreen';
+import { useShareContact } from '../Profile/useShareContact';
 import styles from './Invite.module.css';
 
 const EYEBROW = 'Приглашение';
@@ -18,6 +23,9 @@ const EYEBROW = 'Приглашение';
 const HINT =
   'После вступления заполните заявку: рейс, багаж и сколько готовы ждать. ' +
   'Мы подберём попутчиков до места встречи.';
+
+const PHONE_REQUIRED_TEXT =
+  'Чтобы вступить в группу, поделитесь номером телефона — по нему с вами свяжутся попутчики.';
 
 /** Код не найден (или в неверном формате — тоже «не нашли»). */
 function isNotFound(error: unknown): boolean {
@@ -42,19 +50,46 @@ export function Invite() {
     enabled: validCode,
   });
   const join = useJoin();
+  const { mutate: mutateJoin, submittedAt } = join;
+  /** Вступил: группа становится «первым» экраном — её «Назад» ведёт на «Мои группы», а не на ввод кода. */
+  const onJoin = useCallback(() => {
+    mutateJoin(code, {
+      onSuccess: (event) => replace(`/events/${event.id}`, { asFirst: true }),
+    });
+  }, [mutateJoin, code, replace]);
   const alreadyMember = preview?.already_member === true;
+  const phoneRequired = isApiErrorCode(join.error, 'PHONE_REQUIRED');
+
+  // Профиль только читаем из кэша (его грузит PhoneGate): свой запрос не нужен.
+  const client = useQueryClient();
+  const { data: me, dataUpdatedAt: meUpdatedAt } = useQuery({
+    queryKey: meQueryKey,
+    queryFn: fetchMe,
+    enabled: false,
+  });
+  // Опрашиваем /me напрямую и кладём в кэш только «телефон есть»: иначе PhoneGate закрыл бы экран,
+  // и вступление после появления телефона не повторилось бы.
+  const { sharing, share } = useShareContact(async () => {
+    try {
+      const fresh = await fetchMe();
+      if (fresh.has_phone) client.setQueryData(meQueryKey, fresh);
+      return fresh.has_phone;
+    } catch {
+      return false; // сетевой сбой одной попытки — пробуем следующую
+    }
+  });
+
+  // PHONE_REQUIRED, а /me после отправки вступления уже с телефоном — повторяем вступление.
+  // Сравнение времени не даёт зациклиться, если кэш и бэкенд расходятся.
+  const hasPhoneNow = me?.has_phone === true;
+  useEffect(() => {
+    if (phoneRequired && hasPhoneNow && meUpdatedAt > submittedAt) onJoin();
+  }, [phoneRequired, hasPhoneNow, meUpdatedAt, submittedAt, onJoin]);
 
   // Уже в группе — сразу в неё, без промежуточного экрана; «Назад» из группы — на «Мои группы».
   useEffect(() => {
     if (alreadyMember && preview) replace(`/events/${preview.event_id}`, { asFirst: true });
   }, [alreadyMember, preview, replace]);
-
-  /** Вступил: группа становится «первым» экраном — её «Назад» ведёт на «Мои группы», а не на ввод кода. */
-  function onJoin() {
-    join.mutate(code, {
-      onSuccess: (event) => replace(`/events/${event.id}`, { asFirst: true }),
-    });
-  }
 
   /** С ввода кода — вернуться на него, по deep link — открыть ввод кода вместо превью. */
   function onOtherCode() {
@@ -71,7 +106,7 @@ export function Invite() {
           <Skeleton height={88} />
         </div>
         <div className={styles.footer}>
-          <Button disabled arrow="→">
+          <Button disabled arrow={<Icon icon={ArrowRight} />}>
             Вступить
           </Button>
         </div>
@@ -86,7 +121,7 @@ export function Invite() {
       <Screen center>
         <EmptyState title="Мы не нашли группу" text="Проверьте код приглашения" />
         <div className={styles.footer}>
-          <Button arrow="→" onClick={onOtherCode}>
+          <Button arrow={<Icon icon={ArrowRight} />} onClick={onOtherCode}>
             Ввести другой код
           </Button>
         </div>
@@ -130,17 +165,33 @@ export function Invite() {
       </div>
       <div className={styles.footer}>
         <Button
-          arrow="→"
+          arrow={<Icon icon={ArrowRight} />}
           disabled={join.isPending}
           aria-busy={join.isPending || undefined}
           onClick={onJoin}
         >
           Вступить
         </Button>
-        {join.error && (
-          <p className={styles.error} role="alert">
-            {join.error.message}
-          </p>
+        {phoneRequired ? (
+          <>
+            <p className={styles.error} role="alert">
+              {PHONE_REQUIRED_TEXT}
+            </p>
+            <Button
+              variant="secondary"
+              disabled={sharing}
+              aria-busy={sharing || undefined}
+              onClick={() => void share()}
+            >
+              Поделиться номером
+            </Button>
+          </>
+        ) : (
+          join.error && (
+            <p className={styles.error} role="alert">
+              {join.error.message}
+            </p>
+          )
         )}
       </div>
     </Screen>

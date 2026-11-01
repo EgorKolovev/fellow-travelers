@@ -48,9 +48,19 @@ async def test_baggage_count_above_two(db_session: AsyncSession) -> None:
         await make_application(db_session, baggage_count=3)
 
 
-async def test_max_wait_minutes_not_allowed(db_session: AsyncSession) -> None:
-    with pytest.raises(IntegrityError, match="ck_applications_max_wait_minutes_allowed"):
-        await make_application(db_session, max_wait_minutes=10)
+@pytest.mark.parametrize("minutes", [-1, 1441])
+async def test_max_wait_minutes_out_of_range(db_session: AsyncSession, minutes: int) -> None:
+    with pytest.raises(IntegrityError, match="ck_applications_max_wait_minutes_range"):
+        await make_application(db_session, max_wait_minutes=minutes)
+
+
+@pytest.mark.parametrize("minutes", [0, 10, 1440])
+async def test_max_wait_minutes_in_range_is_allowed(db_session: AsyncSession, minutes: int) -> None:
+    application = await make_application(db_session, max_wait_minutes=minutes)
+    stored = await db_session.scalar(
+        select(Application.max_wait_minutes).where(Application.id == application.id)
+    )
+    assert stored == minutes
 
 
 async def test_assigned_without_transfer(db_session: AsyncSession) -> None:

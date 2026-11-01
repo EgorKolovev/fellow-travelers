@@ -1,3 +1,4 @@
+import { ArrowLeft, ArrowRight } from 'lucide-react';
 import { useTrips } from '../../api/hooks';
 import type { Trip } from '../../api/types';
 import { formatDayMonth } from '../../lib/datetime';
@@ -7,6 +8,7 @@ import { EmptyState } from '../../ui/EmptyState/EmptyState';
 import { FlightInfo } from '../../ui/FlightInfo/FlightInfo';
 import { FlightOption } from '../../ui/FlightOption/FlightOption';
 import { Form, FormFooter } from '../../ui/Form/Form';
+import { Icon } from '../../ui/Icon/Icon';
 import { Option } from '../../ui/Option/Option';
 import { Screen } from '../../ui/Screen/Screen';
 import { Skeleton } from '../../ui/Skeleton/Skeleton';
@@ -188,7 +190,7 @@ export function FlightStep({
               onChange={(date) => onQueryChange({ ...query, date })}
             />
             <FormFooter>
-              <Button type="submit" arrow="→" disabled={!ready}>
+              <Button type="submit" arrow={<Icon icon={ArrowRight} />} disabled={!ready}>
                 Далее
               </Button>
             </FormFooter>
@@ -209,7 +211,7 @@ export function FlightStep({
               subtitle="Проверьте номер рейса и дату. Если рейса нет в списке — напишите организатору"
             />
             <div className={styles.footer}>
-              <Button icon="←" onClick={onBack}>
+              <Button icon={<Icon icon={ArrowLeft} />} onClick={onBack}>
                 Назад
               </Button>
             </div>

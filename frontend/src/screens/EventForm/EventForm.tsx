@@ -1,12 +1,15 @@
+import { ArrowRight } from 'lucide-react';
 import { useState } from 'react';
 import { ApiError } from '../../api/errors';
 import { Button } from '../../ui/Button/Button';
 import { Checkbox } from '../../ui/Checkbox/Checkbox';
 import { Form, FormFields, FormFooter } from '../../ui/Form/Form';
+import { Icon } from '../../ui/Icon/Icon';
 import { TextInput } from '../../ui/TextInput/TextInput';
 import {
   ADDRESS_MAX,
   apiFieldsToForm,
+  datesOrderError,
   INSTRUCTION_MAX,
   TITLE_MAX,
   validateEventForm,
@@ -30,6 +33,7 @@ interface Props {
 export function EventForm({ initial, submitLabel, onSubmit, pending = false, error }: Props) {
   const [values, setValues] = useState(initial);
   // Ошибки клиента показываем после первой попытки отправки, дальше — по мере ввода.
+  // Исключение — порядок дат: его видно сразу, и пока он неверен, отправка заблокирована.
   const [submitted, setSubmitted] = useState(false);
   // Ошибки сервера по полю гасим, как только поле поменяли.
   const [touchedAfterError, setTouchedAfterError] = useState<Set<EventFormField>>(new Set());
@@ -39,7 +43,12 @@ export function EventForm({ initial, submitLabel, onSubmit, pending = false, err
     setTouchedAfterError(new Set());
   }
 
-  const clientErrors = submitted ? validateEventForm(values) : {};
+  const datesError = datesOrderError(values);
+  const clientErrors: EventFormErrors = submitted
+    ? validateEventForm(values)
+    : datesError
+      ? { ends_on: datesError }
+      : {};
   const serverErrors = error instanceof ApiError ? apiFieldsToForm(error.fields) : {};
   const errorOf = (field: EventFormField): string | undefined =>
     clientErrors[field] ?? (touchedAfterError.has(field) ? undefined : serverErrors[field]);
@@ -52,6 +61,7 @@ export function EventForm({ initial, submitLabel, onSubmit, pending = false, err
   }
 
   function submit() {
+    if (datesError) return;
     setSubmitted(true);
     const errors: EventFormErrors = validateEventForm(values);
     if (Object.keys(errors).length === 0) onSubmit(values);
@@ -85,6 +95,7 @@ export function EventForm({ initial, submitLabel, onSubmit, pending = false, err
             type="date"
             value={values.ends_on}
             onChange={(v) => set('ends_on', v)}
+            min={values.starts_on || undefined}
             error={errorOf('ends_on')}
             required
           />
@@ -151,7 +162,11 @@ export function EventForm({ initial, submitLabel, onSubmit, pending = false, err
         />
       </FormFields>
       <FormFooter>
-        <Button type="submit" arrow="→" disabled={pending}>
+        <Button
+          type="submit"
+          arrow={<Icon icon={ArrowRight} />}
+          disabled={pending || datesError !== undefined}
+        >
           {submitLabel}
         </Button>
         {message && (

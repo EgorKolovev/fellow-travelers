@@ -1,9 +1,11 @@
+import { ArrowRight } from 'lucide-react';
 import { useState } from 'react';
 import { useParams } from 'react-router';
 import { useEvent, useInvite } from '../../api/hooks';
 import { copyToClipboard, openExternal, shareUrl } from '../../lib/links';
 import { useBack } from '../../lib/useBack';
 import { Button } from '../../ui/Button/Button';
+import { Icon } from '../../ui/Icon/Icon';
 import { Screen } from '../../ui/Screen/Screen';
 import { ScreenHeader } from '../../ui/ScreenHeader/ScreenHeader';
 import { Skeleton } from '../../ui/Skeleton/Skeleton';
@@ -70,7 +72,7 @@ export function AdminInvite() {
       </div>
       <div className={styles.footer}>
         <Button
-          arrow="→"
+          arrow={<Icon icon={ArrowRight} />}
           onClick={() => openExternal(shareUrl(link, inviteShareText(group.title)))}
         >
           Поделиться

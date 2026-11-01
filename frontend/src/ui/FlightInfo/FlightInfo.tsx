@@ -1,6 +1,8 @@
+import { Pencil, Plane } from 'lucide-react';
 import type { components } from '../../api/schema';
 import { arrivalDayShift, formatDayMonth, formatTime } from '../../lib/datetime';
 import { formatBaggage, formatFlightNumber } from '../../lib/format';
+import { Icon } from '../Icon/Icon';
 import styles from './FlightInfo.module.css';
 
 type Trip = components['schemas']['Trip'];
@@ -11,7 +13,7 @@ interface Props {
   baggageCount?: number;
   /** Пометка «Расписание внесено организатором» для `source=manual`. */
   showSource?: boolean;
-  /** Кнопка ✏️ рядом с номером. */
+  /** Кнопка-карандаш рядом с номером. */
   onEdit?: () => void;
   editLabel?: string;
 }
@@ -78,7 +80,7 @@ export function FlightInfo({ trip, baggageCount, showSource = false, onEdit, edi
             onClick={onEdit}
             aria-label={editLabel ?? 'Изменить рейс'}
           >
-            ✏️
+            <Icon icon={Pencil} />
           </button>
         )}
       </div>
@@ -92,7 +94,7 @@ export function FlightInfo({ trip, baggageCount, showSource = false, onEdit, edi
         </div>
         <div className={styles.line} aria-hidden="true">
           <span className={styles.rule} />
-          <span>✈️</span>
+          <Icon icon={Plane} className={styles.plane} />
           <span className={styles.rule} />
         </div>
         <div className={`${styles.point} ${styles.end}`}>

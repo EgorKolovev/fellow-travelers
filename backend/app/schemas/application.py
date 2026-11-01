@@ -8,7 +8,8 @@ from app.models import Application as ApplicationModel
 from app.models import ApplicationStatus
 from app.schemas.trip import Trip
 
-WaitMinutes = Literal[0, 15, 30]
+# strict: строки, bool и float (даже 15.0) отклоняются — контракт требует integer
+WaitMinutes = Annotated[int, Field(strict=True, ge=0, le=1440)]
 
 
 class ApplicationInput(BaseModel):

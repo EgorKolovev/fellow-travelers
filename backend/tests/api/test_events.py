@@ -530,7 +530,7 @@ async def test_invite_for_admin(
     assert_contract(response, "GET", "/events/{event_id}/invite")
     assert response.json() == {
         "code": "K7Q2ZP",
-        "link": "https://t.me/test_bot?startapp=join_K7Q2ZP",
+        "link": "https://t.me/test_bot?start=join_K7Q2ZP",
     }
 
 

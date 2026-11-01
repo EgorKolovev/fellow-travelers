@@ -103,7 +103,8 @@ Authorization: tma <initData>
 
 ## 6. Ссылки и deep link
 
-- Приглашение: `invite.link` = `https://t.me/<bot>?startapp=join_<code>` (открывает мини-приложение сразу).
+- Приглашение: `invite.link` = `https://t.me/<bot>?start=join_<code>` (ведёт в бота). Бот запрашивает телефон,
+  если его ещё нет, и показывает кнопку «Вступить в группу» → `https://t.me/<bot>?startapp=join_<code>`.
   Код `invite.code` — 6 символов `[A-Z0-9]`, без регистра, вводится вручную.
 - `start_param` мини-приложения (`Telegram.WebApp.initDataUnsafe.start_param`):
 

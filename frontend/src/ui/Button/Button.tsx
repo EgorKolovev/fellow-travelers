@@ -3,10 +3,10 @@ import styles from './Button.module.css';
 
 interface Props extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, 'className'> {
   variant?: 'primary' | 'secondary' | 'danger' | 'dark';
-  /** Иконка слева от текста (эмодзи), например «✏️». */
+  /** Иконка слева от текста, например `<Icon icon={Pencil} />`. */
   icon?: ReactNode;
-  /** Стрелка справа от текста (например «→»). */
-  arrow?: string;
+  /** Иконка справа от текста, обычно `<Icon icon={ArrowRight} />`. */
+  arrow?: ReactNode;
   children: ReactNode;
 }
 
@@ -26,7 +26,11 @@ export function Button({
         </span>
       )}
       <span>{children}</span>
-      {arrow && <span aria-hidden="true">{arrow}</span>}
+      {arrow && (
+        <span className={styles.icon} aria-hidden="true">
+          {arrow}
+        </span>
+      )}
     </button>
   );
 }

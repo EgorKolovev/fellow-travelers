@@ -82,7 +82,7 @@
   cursor: pointer;
 }
 
-/* Плашка «✅ Вы на месте»: как неактивная primary-кнопка. */
+/* Плашка «Вы на месте» с галочкой: как неактивная primary-кнопка. */
 .plate {
   display: flex;
   align-items: center;

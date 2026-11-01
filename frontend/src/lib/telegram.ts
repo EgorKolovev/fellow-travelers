@@ -49,9 +49,15 @@ export function getInitDataRaw(): string | undefined {
   }
 }
 
+/**
+ * `start_param` мини-приложения. Telegram кладёт его в GET-параметр `tgWebAppStartParam`,
+ * но не во всех клиентах (и не при любом способе открытия) — запасной источник
+ * `initData.start_param`.
+ */
 export function getStartParamRaw(): string | undefined {
   try {
-    return retrieveLaunchParams().tgWebAppStartParam || undefined;
+    const lp = retrieveLaunchParams();
+    return lp.tgWebAppStartParam || lp.tgWebAppData?.start_param || undefined;
   } catch {
     return undefined;
   }
@@ -83,8 +89,18 @@ export async function askForContact(): Promise<void> {
   }
 }
 
-export function openBot(): void {
-  const url = `https://t.me/${BOT_USERNAME}`;
+/** Допустимый payload `?start=` для Telegram: 1–64 символа `A-Za-z0-9_-`. */
+const BOT_START_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+/** Ссылка на бота; корректный `startParam` передаётся как `?start=` (бот узнаёт, например, код группы). */
+function botUrl(startParam?: string): string {
+  const base = `https://t.me/${BOT_USERNAME}`;
+  return startParam && BOT_START_RE.test(startParam) ? `${base}?start=${startParam}` : base;
+}
+
+/** Открывает чат с ботом; некорректный `startParam` отбрасывается. */
+export function openBot(startParam?: string): void {
+  const url = botUrl(startParam);
   try {
     if (openTelegramLink.isAvailable()) {
       openTelegramLink(url);

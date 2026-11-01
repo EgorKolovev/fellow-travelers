@@ -175,8 +175,8 @@ describe('ApplicationWizard', () => {
     await click(/Нет, лечу один/);
     expect(await heading('Багаж')).toBeInTheDocument();
     await click(/Только ручная кладь/);
-    expect(await heading('Сколько минут готовы ждать попутчиков?')).toBeInTheDocument();
-    expect(screen.queryByText('Другое время')).not.toBeInTheDocument();
+    expect(await heading('Сколько готовы ждать попутчиков?')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Часы')).not.toBeInTheDocument();
     await click('15 минут');
 
     expect(await heading('Всё верно?')).toBeInTheDocument();
@@ -345,7 +345,7 @@ describe('ApplicationWizard', () => {
 
     // Правка с отменой: «Назад» из шага — в сводку без изменений.
     await click('Изменить: Готов ждать 30 минут');
-    await heading('Сколько минут готовы ждать попутчиков?');
+    await heading('Сколько готовы ждать попутчиков?');
     pressBack();
     expect(await heading('Всё верно?')).toBeInTheDocument();
 
@@ -356,6 +356,78 @@ describe('ApplicationWizard', () => {
       baggage_count: 2,
       max_wait_minutes: 30,
       seek_companions: true,
+    });
+  });
+
+  describe('«Другое время» ожидания', () => {
+    /** Шаги 1–4 и раскрытие «Другое время» на шаге 5. */
+    async function openCustomWait() {
+      renderWizard();
+      await pickMoscowFlight();
+      await click(/Нет, лечу один/);
+      await click(/Только ручная кладь/);
+      await heading('Сколько готовы ждать попутчиков?');
+      await click(/Другое время/);
+    }
+
+    async function enter(hours: string, minutes: string) {
+      const h = screen.getByLabelText('Часы');
+      const m = screen.getByLabelText('Минуты');
+      await userEvent.clear(h);
+      if (hours) await userEvent.type(h, hours);
+      await userEvent.clear(m);
+      if (minutes) await userEvent.type(m, minutes);
+      await click(/Далее/);
+    }
+
+    it('1 ч 30 мин → сводка и PUT с max_wait_minutes: 90', async () => {
+      await openCustomWait();
+      await enter('1', '30');
+      expect(await heading('Всё верно?')).toBeInTheDocument();
+      expect(screen.getByText('Готов ждать 1 ч 30 мин')).toBeInTheDocument();
+      await click(/Да, всё верно/);
+      expect(api.upsertMyApplication).toHaveBeenCalledWith(
+        EVENT_ID,
+        expect.objectContaining({ max_wait_minutes: 90 }),
+      );
+    });
+
+    it('0:00 и 24:01 не проходят, 24:00 → 1440', async () => {
+      await openCustomWait();
+      await enter('0', '0');
+      expect(screen.getByRole('alert')).toHaveTextContent('От 1 минуты до 24 часов');
+      expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent(
+        'Сколько готовы ждать попутчиков?',
+      );
+
+      await enter('24', '1');
+      expect(screen.getByRole('alert')).toHaveTextContent('От 1 минуты до 24 часов');
+
+      await enter('24', '0');
+      expect(await heading('Всё верно?')).toBeInTheDocument();
+      expect(screen.getByText('Готов ждать 24 часа')).toBeInTheDocument();
+      await click(/Да, всё верно/);
+      expect(api.upsertMyApplication).toHaveBeenCalledWith(
+        EVENT_ID,
+        expect.objectContaining({ max_wait_minutes: 1440 }),
+      );
+    });
+
+    it('правка заявки с 90 минутами: поля предзаполнены 1 и 30', async () => {
+      api.fetchMyApplication.mockResolvedValue(makeApplication({ max_wait_minutes: 90 }));
+      renderWizard(`${APPLY}?step=review`);
+      await click('Изменить: Готов ждать 1 ч 30 мин');
+      await heading('Сколько готовы ждать попутчиков?');
+      expect(screen.getByLabelText('Часы')).toHaveValue('1');
+      expect(screen.getByLabelText('Минуты')).toHaveValue('30');
+    });
+
+    it('правка заявки с готовым вариантом: «Другое время» свёрнуто', async () => {
+      api.fetchMyApplication.mockResolvedValue(makeApplication({ max_wait_minutes: 15 }));
+      renderWizard(`${APPLY}?step=review`);
+      await click('Изменить: Готов ждать 15 минут');
+      await heading('Сколько готовы ждать попутчиков?');
+      expect(screen.queryByLabelText('Часы')).not.toBeInTheDocument();
     });
   });
 

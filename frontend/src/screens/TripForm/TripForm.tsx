@@ -1,3 +1,4 @@
+import { ArrowRight, X } from 'lucide-react';
 import { useState } from 'react';
 import { useParams } from 'react-router';
 import { ApiError, isApiErrorCode, isUnauthorized } from '../../api/errors';
@@ -9,6 +10,7 @@ import { Button } from '../../ui/Button/Button';
 import { ConfirmScreen } from '../../ui/ConfirmScreen/ConfirmScreen';
 import { EmptyState } from '../../ui/EmptyState/EmptyState';
 import { Form, FormFields, FormFooter } from '../../ui/Form/Form';
+import { Icon } from '../../ui/Icon/Icon';
 import { Screen } from '../../ui/Screen/Screen';
 import { ScreenHeader } from '../../ui/ScreenHeader/ScreenHeader';
 import { Skeleton } from '../../ui/Skeleton/Skeleton';
@@ -198,7 +200,7 @@ function TripEditor({ eventId, trip, onDone }: EditorProps) {
           )}
         </FormFields>
         <FormFooter>
-          <Button type="submit" arrow="→" disabled={save.isPending}>
+          <Button type="submit" arrow={<Icon icon={ArrowRight} />} disabled={save.isPending}>
             {trip ? 'Сохранить' : 'Добавить рейс'}
           </Button>
           {save.error && (
@@ -212,7 +214,7 @@ function TripEditor({ eventId, trip, onDone }: EditorProps) {
         <div className={styles.footer}>
           <Button
             variant="danger"
-            icon="❌"
+            icon={<Icon icon={X} />}
             onClick={() => {
               remove.reset();
               setConfirmDelete(true);

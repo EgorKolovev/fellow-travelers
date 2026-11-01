@@ -1,25 +1,45 @@
+import {
+  ArrowLeft,
+  ArrowRight,
+  Backpack,
+  Luggage,
+  User,
+  Users,
+  UserX,
+  type LucideIcon,
+} from 'lucide-react';
 import { useState } from 'react';
 import type { WaitMinutes } from '../../api/types';
 import { formatWait } from '../../lib/format';
 import { Button } from '../../ui/Button/Button';
+import { Form, FormFields, FormFooter } from '../../ui/Form/Form';
+import { Icon } from '../../ui/Icon/Icon';
 import { NumberInput } from '../../ui/NumberInput/NumberInput';
 import { Option } from '../../ui/Option/Option';
 import { Screen } from '../../ui/Screen/Screen';
+import { TextInput } from '../../ui/TextInput/TextInput';
 import styles from './ApplicationWizard.module.css';
-import { MAX_BAGGAGE, type CompanionChoice } from './draft';
+import {
+  joinWait,
+  MAX_BAGGAGE,
+  splitWait,
+  WAIT_PRESETS,
+  type CompanionChoice,
+  type WaitParts,
+} from './draft';
 import { WizardHeader } from './WizardHeader';
 
 const COMPANION_OPTIONS: {
   choice: CompanionChoice;
-  emoji: string;
+  icon: LucideIcon;
   title: string;
   subtitle?: string;
 }[] = [
-  { choice: 'alone', emoji: '👤', title: 'Нет, лечу один' },
-  { choice: 'plusOne', emoji: '👥', title: 'Да, со мной +1' },
+  { choice: 'alone', icon: User, title: 'Нет, лечу один' },
+  { choice: 'plusOne', icon: Users, title: 'Да, со мной +1' },
   {
     choice: 'noSeek',
-    emoji: '🙅',
+    icon: UserX,
     title: 'Не искать попутчиков',
     subtitle: 'Если вместе с вами летит больше 2 человек',
   },
@@ -35,10 +55,10 @@ export function CompanionStep({ onChoose }: { onChoose: (choice: CompanionChoice
         subtitle="Учтём при подборе попутчиков, чтобы все влезли в такси"
       />
       <ul className={styles.options}>
-        {COMPANION_OPTIONS.map(({ choice, emoji, title, subtitle }) => (
+        {COMPANION_OPTIONS.map(({ choice, icon, title, subtitle }) => (
           <li key={choice}>
             <Option
-              leading={emoji}
+              leading={<Icon icon={icon} size={24} />}
               title={title}
               subtitle={subtitle}
               onClick={() => onChoose(choice)}
@@ -66,7 +86,7 @@ export function BaggageStep({
       <ul className={styles.options}>
         <li>
           <Option
-            leading="🎒"
+            leading={<Icon icon={Backpack} size={24} />}
             title="Только ручная кладь"
             subtitle="Сразу выйду из зоны прилёта"
             onClick={onHandLuggage}
@@ -74,7 +94,7 @@ export function BaggageStep({
         </li>
         <li>
           <Option
-            leading="🧳"
+            leading={<Icon icon={Luggage} size={24} />}
             title="Лечу с багажом"
             subtitle="Буду ждать выдачу багажа"
             onClick={onWithBaggage}
@@ -125,17 +145,21 @@ export function BaggageCountStep({
               В одно такси помещается не больше двух чемоданов. Если у вас больше — выберите «Не
               искать попутчиков»
             </p>
-            <Button variant="secondary" icon="🙅" onClick={() => onNoSeek(count)}>
+            <Button
+              variant="secondary"
+              icon={<Icon icon={UserX} />}
+              onClick={() => onNoSeek(count)}
+            >
               Не искать попутчиков
             </Button>
           </>
         )}
       </div>
       <div className={styles.footer}>
-        <Button arrow="→" onClick={() => onNext(count)}>
+        <Button arrow={<Icon icon={ArrowRight} />} onClick={() => onNext(count)}>
           Далее
         </Button>
-        <Button variant="secondary" icon="←" onClick={onBack}>
+        <Button variant="secondary" icon={<Icon icon={ArrowLeft} />} onClick={onBack}>
           Назад
         </Button>
       </div>
@@ -143,24 +167,93 @@ export function BaggageCountStep({
   );
 }
 
-const WAIT_OPTIONS: WaitMinutes[] = [0, 15, 30];
+const WAIT_ERROR = 'От 1 минуты до 24 часов';
 
-/** Шаг 5 «Сколько минут готовы ждать попутчиков?» (контракт: 0 / 15 / 30). */
-export function WaitStep({ onChoose }: { onChoose: (minutes: WaitMinutes) => void }) {
+interface WaitStepProps {
+  /** Текущее значение при правке: не из готовых вариантов — сразу открыто «Другое время». */
+  value?: WaitMinutes;
+  onChoose: (minutes: WaitMinutes) => void;
+}
+
+/** Шаг 5 «Сколько готовы ждать попутчиков?»: 0 / 15 / 30 или своё время до 24 часов. */
+export function WaitStep({ value, onChoose }: WaitStepProps) {
+  const isCustom = value !== undefined && !WAIT_PRESETS.includes(value);
+  const [custom, setCustom] = useState(isCustom);
+  const [parts, setParts] = useState<WaitParts>(
+    isCustom ? splitWait(value) : { hours: '', minutes: '' },
+  );
+  const [error, setError] = useState<string | null>(null);
+
+  function change(next: WaitParts) {
+    setParts(next);
+    setError(null);
+  }
+
+  function submit() {
+    const minutes = joinWait(parts);
+    if (minutes === null) setError(WAIT_ERROR);
+    else onChoose(minutes);
+  }
+
   return (
     <Screen>
       <WizardHeader
         step={5}
-        title="Сколько минут готовы ждать попутчиков?"
+        title="Сколько готовы ждать попутчиков?"
         subtitle="Будем искать по времени прилёта по расписанию. В одно такси посадим не больше трёх пассажиров"
       />
       <ul className={styles.options}>
-        {WAIT_OPTIONS.map((minutes) => (
+        {WAIT_PRESETS.map((minutes) => (
           <li key={minutes}>
             <Option title={formatWait(minutes)} onClick={() => onChoose(minutes)} />
           </li>
         ))}
+        <li>
+          {/* Карточка остаётся на месте после нажатия, чтобы не терять фокус. */}
+          <Option
+            title="Другое время"
+            subtitle="До 24 часов"
+            trailing={custom ? 'none' : 'arrow'}
+            onClick={() => setCustom(true)}
+          />
+        </li>
       </ul>
+      {custom && (
+        <Form onSubmit={submit}>
+          <FormFields>
+            <div className={styles.waitFields}>
+              <TextInput
+                label="Часы"
+                value={parts.hours}
+                onChange={(hours) => change({ ...parts, hours })}
+                placeholder="0"
+                inputMode="numeric"
+                autoComplete="off"
+                maxLength={2}
+              />
+              <TextInput
+                label="Минуты"
+                value={parts.minutes}
+                onChange={(minutes) => change({ ...parts, minutes })}
+                placeholder="0"
+                inputMode="numeric"
+                autoComplete="off"
+                maxLength={2}
+              />
+            </div>
+            {error && (
+              <p className={styles.notice} role="alert">
+                {error}
+              </p>
+            )}
+          </FormFields>
+          <FormFooter>
+            <Button type="submit" arrow={<Icon icon={ArrowRight} />}>
+              Далее
+            </Button>
+          </FormFooter>
+        </Form>
+      )}
     </Screen>
   );
 }

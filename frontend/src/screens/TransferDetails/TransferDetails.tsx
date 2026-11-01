@@ -1,3 +1,4 @@
+import { ArrowRight, MessageCircle } from 'lucide-react';
 import { useParams } from 'react-router';
 import { useAdminTransfers, useEvent } from '../../api/hooks';
 import type { Event, Transfer } from '../../api/types';
@@ -6,6 +7,7 @@ import { useBack, useReplace } from '../../lib/useBack';
 import { Button } from '../../ui/Button/Button';
 import { EmptyState } from '../../ui/EmptyState/EmptyState';
 import { FellowList } from '../../ui/FellowList/FellowList';
+import { Icon } from '../../ui/Icon/Icon';
 import { Screen } from '../../ui/Screen/Screen';
 import { ScreenHeader } from '../../ui/ScreenHeader/ScreenHeader';
 import { SectionHeader } from '../../ui/SectionHeader/SectionHeader';
@@ -74,7 +76,11 @@ function TransferBody({ event, transfer }: { event: Event; transfer: Transfer })
         />
         <p className={styles.muted}>Место сбора: {event.meeting_point.address}</p>
         {chatUrl && isTelegramChatUrl(chatUrl) && (
-          <Button variant="secondary" icon="💬" onClick={() => openExternal(chatUrl)}>
+          <Button
+            variant="secondary"
+            icon={<Icon icon={MessageCircle} />}
+            onClick={() => openExternal(chatUrl)}
+          >
             Открыть общий чат
           </Button>
         )}
@@ -144,7 +150,7 @@ export function TransferDetails() {
             title="Трансфер не найден"
             text="Возможно, его расформировали — посмотрите актуальный список"
           />
-          <Button arrow="→" onClick={() => replace(listPath)}>
+          <Button arrow={<Icon icon={ArrowRight} />} onClick={() => replace(listPath)}>
             Все трансферы
           </Button>
         </div>

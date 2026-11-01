@@ -1,3 +1,13 @@
+import {
+  ArrowRight,
+  Backpack,
+  Luggage,
+  Timer,
+  User,
+  Users,
+  UserX,
+  type LucideIcon,
+} from 'lucide-react';
 import { useMe } from '../../api/hooks';
 import type { ApplicationInput, Trip } from '../../api/types';
 import { formatBaggage, formatName, formatPhone, formatWait } from '../../lib/format';
@@ -5,13 +15,14 @@ import { getInitDataPhotoUrl } from '../../lib/telegram';
 import { Avatar } from '../../ui/Avatar/Avatar';
 import { Button } from '../../ui/Button/Button';
 import { FlightInfo } from '../../ui/FlightInfo/FlightInfo';
+import { Icon } from '../../ui/Icon/Icon';
 import { Option } from '../../ui/Option/Option';
 import { Screen } from '../../ui/Screen/Screen';
 import { Skeleton } from '../../ui/Skeleton/Skeleton';
 import styles from './ApplicationWizard.module.css';
 import { WizardHeader } from './WizardHeader';
 
-/** Шаг, на который ведёт ✏️ строки сводки. */
+/** Шаг, на который ведёт карандаш строки сводки. */
 export type ReviewSection = 'profile' | 'flight' | 'companion' | 'baggage' | 'wait';
 
 /** Ошибка отправки: текст и, если дальше в мастере делать нечего, кнопка к группе. */
@@ -29,11 +40,11 @@ interface Props {
   error: SubmitError | null;
 }
 
-function companionRow(input: ApplicationInput): { emoji: string; title: string } {
-  if (input.seek_companions === false) return { emoji: '🙅', title: 'Не ищу попутчиков' };
+function companionRow(input: ApplicationInput): { icon: LucideIcon; title: string } {
+  if (input.seek_companions === false) return { icon: UserX, title: 'Не ищу попутчиков' };
   return input.with_companion
-    ? { emoji: '👥', title: 'Лечу с +1' }
-    : { emoji: '👤', title: 'Лечу один' };
+    ? { icon: Users, title: 'Лечу с +1' }
+    : { icon: User, title: 'Лечу один' };
 }
 
 function capitalize(text: string): string {
@@ -60,7 +71,7 @@ function ProfileRow({ onEdit }: { onEdit: () => void }) {
   );
 }
 
-/** Сводка «Всё верно?»: каждая строка с ✏️ ведёт на свой шаг, «Да, всё верно» отправляет заявку. */
+/** Сводка «Всё верно?»: каждая строка с карандашом ведёт на свой шаг, «Да, всё верно» отправляет заявку. */
 export function ReviewStep({ trip, input, onEdit, onSubmit, pending, error }: Props) {
   const companion = companionRow(input);
   const baggage = capitalize(formatBaggage(input.baggage_count));
@@ -69,10 +80,10 @@ export function ReviewStep({ trip, input, onEdit, onSubmit, pending, error }: Pr
       ? `Готов ждать ${formatWait(input.max_wait_minutes)}`
       : formatWait(0);
 
-  const row = (section: ReviewSection, emoji: string, title: string) => (
+  const row = (section: ReviewSection, icon: LucideIcon, title: string) => (
     <li>
       <Option
-        leading={emoji}
+        leading={<Icon icon={icon} size={24} />}
         title={title}
         trailing="edit"
         onClick={() => onEdit(section)}
@@ -91,12 +102,12 @@ export function ReviewStep({ trip, input, onEdit, onSubmit, pending, error }: Pr
         <li>
           <FlightInfo trip={trip} onEdit={() => onEdit('flight')} editLabel="Изменить рейс" />
         </li>
-        {row('companion', companion.emoji, companion.title)}
-        {row('baggage', input.baggage_count > 0 ? '🧳' : '🎒', baggage)}
-        {row('wait', '⏲️', wait)}
+        {row('companion', companion.icon, companion.title)}
+        {row('baggage', input.baggage_count > 0 ? Luggage : Backpack, baggage)}
+        {row('wait', Timer, wait)}
       </ul>
       <div className={styles.footer}>
-        <Button arrow="→" onClick={onSubmit} disabled={pending}>
+        <Button arrow={<Icon icon={ArrowRight} />} onClick={onSubmit} disabled={pending}>
           Да, всё верно
         </Button>
         {error && (
