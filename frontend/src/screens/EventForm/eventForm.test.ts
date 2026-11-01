@@ -3,6 +3,8 @@ import { makeEvent } from '../../test/events';
 import {
   apiFieldsToForm,
   CHAT_URL_ERROR,
+  DATES_ORDER_ERROR,
+  datesOrderError,
   EMPTY_EVENT_FORM,
   eventToForm,
   formToCreate,
@@ -20,6 +22,28 @@ const filled: EventFormValues = {
   destination_address: 'Отель',
   meeting_instruction: 'Ждём у стойки',
 };
+
+describe('datesOrderError', () => {
+  it('окончание раньше начала — ошибка', () => {
+    expect(datesOrderError({ starts_on: '2026-11-14', ends_on: '2026-11-12' })).toBe(
+      'Дата окончания раньше даты начала',
+    );
+  });
+
+  it.each([
+    ['2026-11-14', '2026-11-14'],
+    ['2026-11-12', '2026-11-14'],
+    ['', '2026-11-12'],
+    ['2026-11-14', ''],
+    ['', ''],
+  ])('без ошибки: начало %j, окончание %j', (starts_on, ends_on) => {
+    expect(datesOrderError({ starts_on, ends_on })).toBeUndefined();
+  });
+
+  it('тот же текст, что в validateEventForm', () => {
+    expect(validateEventForm({ ...filled, ends_on: '2026-08-21' }).ends_on).toBe(DATES_ORDER_ERROR);
+  });
+});
 
 describe('validateEventForm', () => {
   it('пустая форма — обязательные поля', () => {

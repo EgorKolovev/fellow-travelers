@@ -13,6 +13,9 @@ interface Props {
   type?: 'text' | 'url' | 'tel' | 'date' | 'datetime-local' | 'search';
   inputMode?: HTMLAttributes<HTMLInputElement>['inputMode'];
   maxLength?: number;
+  /** Границы для `type="date"` и т.п. (`YYYY-MM-DD`); у textarea игнорируются. */
+  min?: string;
+  max?: string;
   /** Многострочное поле (textarea). */
   multiline?: boolean;
   rows?: number;
@@ -35,6 +38,8 @@ export function TextInput({
   type = 'text',
   inputMode,
   maxLength,
+  min,
+  max,
   multiline = false,
   rows = 3,
   disabled,
@@ -80,6 +85,8 @@ export function TextInput({
           className={className}
           type={type}
           inputMode={inputMode}
+          min={min}
+          max={max}
           onChange={(e) => onChange(e.target.value)}
         />
       )}

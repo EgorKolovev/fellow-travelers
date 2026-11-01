@@ -122,6 +122,36 @@ describe('EventSettings', () => {
     expect(screen.queryByTestId('location')).not.toBeInTheDocument();
   });
 
+  it('окончание раньше начала — подсказка сразу, кнопка заблокирована, без запроса', async () => {
+    api.fetchEvent.mockResolvedValue(makeEvent());
+    api.updateEvent.mockResolvedValue(makeEvent());
+    renderSettings();
+    const user = userEvent.setup();
+    const starts = await screen.findByLabelText('Начало');
+    const ends = screen.getByLabelText('Окончание');
+    const save = () => screen.getByRole('button', { name: /Сохранить/ });
+
+    await user.clear(starts);
+    await user.type(starts, '2026-11-14');
+    await user.clear(ends);
+    await user.type(ends, '2026-11-12');
+    expect(ends).toHaveAttribute('min', '2026-11-14');
+    expect(ends).toHaveAccessibleDescription('Дата окончания раньше даты начала');
+    expect(save()).toBeDisabled();
+    await user.click(save());
+    expect(api.updateEvent).not.toHaveBeenCalled();
+
+    await user.clear(ends);
+    await user.type(ends, '2026-11-16');
+    expect(screen.queryByText('Дата окончания раньше даты начала')).not.toBeInTheDocument();
+    expect(save()).toBeEnabled();
+    await user.click(save());
+    expect(api.updateEvent).toHaveBeenCalledWith(EVENT_ID, {
+      starts_on: '2026-11-14',
+      ends_on: '2026-11-16',
+    });
+  });
+
   it('не админ → «только организатор»', async () => {
     api.fetchEvent.mockResolvedValue(makeEvent({ is_admin: false, is_participant: true }));
     renderSettings();
