@@ -24,10 +24,14 @@ def phone_keyboard() -> ReplyKeyboardMarkup:
 
 
 def app_keyboard(join_code: str | None = None) -> InlineKeyboardMarkup:
-    open_param = None if join_code is None else f"join_{join_code}"
+    """Кнопки приложения; с кодом приглашения первая кнопка ведёт на вступление в группу."""
+    if join_code is None:
+        first = InlineKeyboardButton(text=texts.OPEN_APP_BUTTON, url=mini_app_link(None))
+    else:
+        first = InlineKeyboardButton(text=texts.JOIN_BUTTON, url=mini_app_link(f"join_{join_code}"))
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=texts.OPEN_APP_BUTTON, url=mini_app_link(open_param))],
+            [first],
             [InlineKeyboardButton(text=texts.ADMIN_BUTTON, url=mini_app_link("admin"))],
         ]
     )

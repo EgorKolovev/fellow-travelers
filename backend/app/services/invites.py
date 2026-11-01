@@ -17,12 +17,16 @@ async def get_event_by_code(session: AsyncSession, code: str) -> Event:
 async def join_event(session: AsyncSession, event: Event, user: User) -> bool:
     """Вступает в группу; True — членство создано, False — пользователь уже участник.
 
-    Действующие участники сохраняют доступ, даже если вступление закрыто.
+    Действующие участники сохраняют доступ, даже если вступление закрыто или нет телефона.
     """
-    if not event.join_open:
-        if not await is_member(session, event.id, user.id):
-            raise AppError(ErrorCode.JOIN_CLOSED, "Вступление в группу закрыто", 409)
+    if await is_member(session, event.id, user.id):
         return False
+    if not event.join_open:
+        raise AppError(ErrorCode.JOIN_CLOSED, "Вступление в группу закрыто", 409)
+    if user.phone is None:
+        raise AppError(
+            ErrorCode.PHONE_REQUIRED, "Чтобы вступить в группу, поделитесь телефоном в боте", 403
+        )
     stmt = (
         insert(Membership)
         .values(event_id=event.id, user_id=user.id)

@@ -18,7 +18,7 @@ from aiogram.types import User as TgUser
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot import handlers
+from app.bot import handlers, texts
 from app.bot.keyboards import mini_app_link
 from app.models import User
 
@@ -55,6 +55,10 @@ def last_markup(message: MagicMock) -> Any:
 
 def inline_urls(markup: InlineKeyboardMarkup) -> list[str | None]:
     return [b.url for row in markup.inline_keyboard for b in row]
+
+
+def inline_texts(markup: InlineKeyboardMarkup) -> list[str]:
+    return [b.text for row in markup.inline_keyboard for b in row]
 
 
 async def get_user(session: AsyncSession) -> User | None:
@@ -104,6 +108,22 @@ async def test_start_with_phone_shows_inline_buttons(
         "https://t.me/test_bot?startapp",
         "https://t.me/test_bot?startapp=admin",
     ]
+    assert inline_texts(markup) == [texts.OPEN_APP_BUTTON, texts.ADMIN_BUTTON]
+
+
+async def test_start_with_phone_and_join_code_shows_join_button(
+    db_session: AsyncSession, state: FSMContext
+) -> None:
+    await start(state)
+    await share(state)
+    message = await start(state, "join_ABC123")
+    markup = last_markup(message)
+    assert isinstance(markup, InlineKeyboardMarkup)
+    assert inline_texts(markup) == [texts.JOIN_BUTTON, texts.ADMIN_BUTTON]
+    assert inline_urls(markup) == [
+        "https://t.me/test_bot?startapp=join_ABC123",
+        "https://t.me/test_bot?startapp=admin",
+    ]
 
 
 async def test_join_payload_survives_contact(db_session: AsyncSession, state: FSMContext) -> None:
@@ -115,6 +135,7 @@ async def test_join_payload_survives_contact(db_session: AsyncSession, state: FS
     markup = last_markup(answer)
     assert isinstance(markup, InlineKeyboardMarkup)
     assert inline_urls(markup)[0] == "https://t.me/test_bot?startapp=join_ABC123"
+    assert inline_texts(markup)[0] == texts.JOIN_BUTTON
     user = await get_user(db_session)
     assert user is not None
     assert user.phone == "+79991234567"
@@ -127,6 +148,7 @@ async def test_plain_start_forgets_previous_invite(
     await share(state)
     message = await start(state)
     assert inline_urls(last_markup(message))[0] == mini_app_link(None)
+    assert inline_texts(last_markup(message))[0] == texts.OPEN_APP_BUTTON
 
 
 @pytest.mark.parametrize("payload", ["join_AB", "join_ABC1234", "join_AB-123", "admin", "x"])
@@ -136,6 +158,7 @@ async def test_invalid_payload_ignored(
     await start(state, payload)
     answer = await share(state)
     assert inline_urls(last_markup(answer))[0] == mini_app_link(None)
+    assert inline_texts(last_markup(answer))[0] == texts.OPEN_APP_BUTTON
 
 
 async def test_foreign_contact_rejected(db_session: AsyncSession, state: FSMContext) -> None:
