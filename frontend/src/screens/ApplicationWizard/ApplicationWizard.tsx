@@ -234,6 +234,7 @@ export function ApplicationWizard() {
     case 'wait':
       return (
         <WaitStep
+          value={draft.maxWait}
           onChoose={(minutes) => proceed({ ...draft, maxWait: minutes }, { name: 'review' })}
         />
       );

@@ -26,8 +26,12 @@ export function formatBaggage(count: number): string {
   return `${count} ${plural(count, ['чемодан', 'чемодана', 'чемоданов'])}`;
 }
 
-/** 0 → «Не хочу ждать», 15 → «15 минут». */
+/** 0 → «Не хочу ждать», 15 → «15 минут», 60 → «1 час», 120 → «2 часа», 90 → «1 ч 30 мин». */
 export function formatWait(minutes: number): string {
   if (minutes <= 0) return 'Не хочу ждать';
-  return `${minutes} ${plural(minutes, ['минута', 'минуты', 'минут'])}`;
+  if (minutes < 60) return `${minutes} ${plural(minutes, ['минута', 'минуты', 'минут'])}`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  if (rest === 0) return `${hours} ${plural(hours, ['час', 'часа', 'часов'])}`;
+  return `${hours} ч ${rest} мин`;
 }
