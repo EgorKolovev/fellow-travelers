@@ -2,11 +2,20 @@ import { useState } from 'react';
 import type { WaitMinutes } from '../../api/types';
 import { formatWait } from '../../lib/format';
 import { Button } from '../../ui/Button/Button';
+import { Form, FormFields, FormFooter } from '../../ui/Form/Form';
 import { NumberInput } from '../../ui/NumberInput/NumberInput';
 import { Option } from '../../ui/Option/Option';
 import { Screen } from '../../ui/Screen/Screen';
+import { TextInput } from '../../ui/TextInput/TextInput';
 import styles from './ApplicationWizard.module.css';
-import { MAX_BAGGAGE, type CompanionChoice } from './draft';
+import {
+  joinWait,
+  MAX_BAGGAGE,
+  splitWait,
+  WAIT_PRESETS,
+  type CompanionChoice,
+  type WaitParts,
+} from './draft';
 import { WizardHeader } from './WizardHeader';
 
 const COMPANION_OPTIONS: {
@@ -143,24 +152,93 @@ export function BaggageCountStep({
   );
 }
 
-const WAIT_OPTIONS: WaitMinutes[] = [0, 15, 30];
+const WAIT_ERROR = 'От 1 минуты до 24 часов';
 
-/** Шаг 5 «Сколько минут готовы ждать попутчиков?» (контракт: 0 / 15 / 30). */
-export function WaitStep({ onChoose }: { onChoose: (minutes: WaitMinutes) => void }) {
+interface WaitStepProps {
+  /** Текущее значение при правке: не из готовых вариантов — сразу открыто «Другое время». */
+  value?: WaitMinutes;
+  onChoose: (minutes: WaitMinutes) => void;
+}
+
+/** Шаг 5 «Сколько готовы ждать попутчиков?»: 0 / 15 / 30 или своё время до 24 часов. */
+export function WaitStep({ value, onChoose }: WaitStepProps) {
+  const isCustom = value !== undefined && !WAIT_PRESETS.includes(value);
+  const [custom, setCustom] = useState(isCustom);
+  const [parts, setParts] = useState<WaitParts>(
+    isCustom ? splitWait(value) : { hours: '', minutes: '' },
+  );
+  const [error, setError] = useState<string | null>(null);
+
+  function change(next: WaitParts) {
+    setParts(next);
+    setError(null);
+  }
+
+  function submit() {
+    const minutes = joinWait(parts);
+    if (minutes === null) setError(WAIT_ERROR);
+    else onChoose(minutes);
+  }
+
   return (
     <Screen>
       <WizardHeader
         step={5}
-        title="Сколько минут готовы ждать попутчиков?"
+        title="Сколько готовы ждать попутчиков?"
         subtitle="Будем искать по времени прилёта по расписанию. В одно такси посадим не больше трёх пассажиров"
       />
       <ul className={styles.options}>
-        {WAIT_OPTIONS.map((minutes) => (
+        {WAIT_PRESETS.map((minutes) => (
           <li key={minutes}>
             <Option title={formatWait(minutes)} onClick={() => onChoose(minutes)} />
           </li>
         ))}
+        <li>
+          {/* Карточка остаётся на месте после нажатия, чтобы не терять фокус. */}
+          <Option
+            title="Другое время"
+            subtitle="До 24 часов"
+            trailing={custom ? 'none' : 'arrow'}
+            onClick={() => setCustom(true)}
+          />
+        </li>
       </ul>
+      {custom && (
+        <Form onSubmit={submit}>
+          <FormFields>
+            <div className={styles.waitFields}>
+              <TextInput
+                label="Часы"
+                value={parts.hours}
+                onChange={(hours) => change({ ...parts, hours })}
+                placeholder="0"
+                inputMode="numeric"
+                autoComplete="off"
+                maxLength={2}
+              />
+              <TextInput
+                label="Минуты"
+                value={parts.minutes}
+                onChange={(minutes) => change({ ...parts, minutes })}
+                placeholder="0"
+                inputMode="numeric"
+                autoComplete="off"
+                maxLength={2}
+              />
+            </div>
+            {error && (
+              <p className={styles.notice} role="alert">
+                {error}
+              </p>
+            )}
+          </FormFields>
+          <FormFooter>
+            <Button type="submit" arrow="→">
+              Далее
+            </Button>
+          </FormFooter>
+        </Form>
+      )}
     </Screen>
   );
 }
