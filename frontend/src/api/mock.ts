@@ -1,3 +1,4 @@
+import { ApiError } from './errors';
 import type { components } from './schema';
 
 type Me = components['schemas']['Me'];
@@ -15,4 +16,12 @@ export async function mockFetchMe(noPhone: boolean): Promise<Me> {
     telegram_id: 99281932,
     has_phone: !noPhone,
   };
+}
+
+/**
+ * Вступление без телефона (VITE_MOCK_API=true и VITE_MOCK_NO_PHONE=true) — 403 PHONE_REQUIRED
+ * по контракту. С телефоном мока нет: запрос уходит на бэкенд.
+ */
+export function mockJoinWithoutPhone(): never {
+  throw new ApiError(403, 'PHONE_REQUIRED', 'Чтобы вступить в группу, поделитесь номером телефона');
 }

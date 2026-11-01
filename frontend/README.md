@@ -38,10 +38,10 @@ npm run check:api    # проверить, что schema.d.ts актуален (
 | Переменная           | Назначение                                                                                       |
 | -------------------- | ------------------------------------------------------------------------------------------------ |
 | `VITE_API_BASE`      | Базовый URL API, по умолчанию `/api/v1`                                                          |
-| `VITE_BOT_USERNAME`  | Username бота без `@`: открывается, если `requestContact` недоступен                             |
+| `VITE_BOT_USERNAME`  | Username бота без `@`: открывается (с `?start=<start param>`), если `requestContact` недоступен  |
 | `VITE_MOCK_TELEGRAM` | `true` (только dev) — имитировать окружение Telegram (initData из `VITE_DEV_USERS` или фейковая) |
 | `VITE_MOCK_API`      | `true` — вместо сети отдавать фиктивный профиль                                                  |
-| `VITE_MOCK_NO_PHONE` | `true` — фиктивный профиль без телефона (с `VITE_MOCK_API`)                                      |
+| `VITE_MOCK_NO_PHONE` | `true` — профиль без телефона (с `VITE_MOCK_API`): экран «Нужен номер», join → `PHONE_REQUIRED`  |
 | `VITE_DEV_USERS`     | Только dev, с `VITE_MOCK_TELEGRAM`: тестовые пользователи с подписанной initData                 |
 
 Переменные `VITE_*` подставляются при сборке (в Docker-образе — через `--build-arg`, см. «Деплой»).
