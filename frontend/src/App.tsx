@@ -14,6 +14,7 @@ import { Home } from './screens/Home/Home';
 import { Invite } from './screens/Invite/Invite';
 import { Join } from './screens/Join/Join';
 import { MyTrip } from './screens/MyTrip/MyTrip';
+import { PhoneGate } from './screens/PhoneGate/PhoneGate';
 import { Profile } from './screens/Profile/Profile';
 import { TransferDetails } from './screens/TransferDetails/TransferDetails';
 import { TripForm } from './screens/TripForm/TripForm';
@@ -57,7 +58,10 @@ export function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <StartParamContext.Provider value={startParam}>
-        <RouterProvider router={router} />
+        {/* Телефон — до любого экрана (CAP-01); роутер с первым экраном по start_param — за гейтом. */}
+        <PhoneGate>
+          <RouterProvider router={router} />
+        </PhoneGate>
       </StartParamContext.Provider>
     </QueryClientProvider>
   );
