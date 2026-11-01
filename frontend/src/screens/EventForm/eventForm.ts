@@ -63,6 +63,17 @@ function required(value: string, message: string, max?: number): string | undefi
   return undefined;
 }
 
+export const DATES_ORDER_ERROR = 'Дата окончания раньше даты начала';
+
+/** Окончание раньше начала (обе даты заполнены). Даты `YYYY-MM-DD` сравниваются как строки. */
+export function datesOrderError(
+  v: Pick<EventFormValues, 'starts_on' | 'ends_on'>,
+): string | undefined {
+  const starts = v.starts_on.trim();
+  const ends = v.ends_on.trim();
+  return starts && ends && ends < starts ? DATES_ORDER_ERROR : undefined;
+}
+
 /** Проверка на клиенте; пустой объект — можно отправлять. */
 export function validateEventForm(v: EventFormValues): EventFormErrors {
   const errors: EventFormErrors = {
@@ -80,10 +91,7 @@ export function validateEventForm(v: EventFormValues): EventFormErrors {
       INSTRUCTION_MAX,
     ),
   };
-  // Даты `YYYY-MM-DD` сравниваются как строки.
-  if (!errors.starts_on && !errors.ends_on && v.ends_on < v.starts_on) {
-    errors.ends_on = 'Дата окончания раньше даты начала';
-  }
+  if (!errors.starts_on && !errors.ends_on) errors.ends_on = datesOrderError(v);
   const chat = v.chat_url.trim();
   if (chat && !isTelegramChatUrl(chat)) errors.chat_url = CHAT_URL_ERROR;
   return Object.fromEntries(
