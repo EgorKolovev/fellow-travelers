@@ -1,3 +1,4 @@
+import { CarTaxiFront, CircleCheck, MessageCircle, Search } from 'lucide-react';
 import { useState } from 'react';
 import type { Application, Event, MyTrip, Transfer } from '../../api/types';
 import {
@@ -9,6 +10,7 @@ import {
 import { Button } from '../../ui/Button/Button';
 import { EmptyState } from '../../ui/EmptyState/EmptyState';
 import { FellowList } from '../../ui/FellowList/FellowList';
+import { Icon } from '../../ui/Icon/Icon';
 import { SectionHeader } from '../../ui/SectionHeader/SectionHeader';
 import styles from './MyTrip.module.css';
 import { everyoneAtMeetingPoint, memberCaption } from './phase';
@@ -27,7 +29,11 @@ export function MeetSection({ event }: { event: Event }) {
       <p className={styles.text}>Место сбора: {meeting}</p>
       {pickup !== meeting && <p className={styles.text}>Посадка в такси: {pickup}</p>}
       {chatUrl && isTelegramChatUrl(chatUrl) && (
-        <Button variant="secondary" icon="💬" onClick={() => openExternal(chatUrl)}>
+        <Button
+          variant="secondary"
+          icon={<Icon icon={MessageCircle} />}
+          onClick={() => openExternal(chatUrl)}
+        >
           Общий чат
         </Button>
       )}
@@ -76,7 +82,12 @@ export function FellowsSection({
           title="Вы едете один"
           description="Когда прилетите, отправляйтесь к точке посадки такси"
         />
-        <Button variant="secondary" icon="🔍" onClick={onResume} disabled={pending}>
+        <Button
+          variant="secondary"
+          icon={<Icon icon={Search} />}
+          onClick={onResume}
+          disabled={pending}
+        >
           Найти попутчиков
         </Button>
       </section>
@@ -134,7 +145,7 @@ export function MarksSection({ app, onMeetingPoint, onDeparted, pending }: Marks
       {app.at_meeting_point ? (
         <>
           <p className={styles.plate}>
-            <span aria-hidden="true">✅</span> Вы на месте
+            <Icon icon={CircleCheck} /> Вы на месте
           </p>
           <button
             type="button"
@@ -146,11 +157,20 @@ export function MarksSection({ app, onMeetingPoint, onDeparted, pending }: Marks
           </button>
         </>
       ) : (
-        <Button icon="✅" onClick={() => onMeetingPoint(true)} disabled={pending}>
+        <Button
+          icon={<Icon icon={CircleCheck} />}
+          onClick={() => onMeetingPoint(true)}
+          disabled={pending}
+        >
           Я на месте
         </Button>
       )}
-      <Button variant="dark" icon="🚕" onClick={onDeparted} disabled={pending}>
+      <Button
+        variant="dark"
+        icon={<Icon icon={CarTaxiFront} />}
+        onClick={onDeparted}
+        disabled={pending}
+      >
         Я уехал
       </Button>
     </section>
@@ -205,7 +225,11 @@ export function TaxiSection({ myTrip }: { myTrip: MyTrip }) {
         </p>
       </div>
       {isSafeExternalUrl(url) && (
-        <Button variant="dark" icon="🚕" onClick={() => openExternal(url)}>
+        <Button
+          variant="dark"
+          icon={<Icon icon={CarTaxiFront} />}
+          onClick={() => openExternal(url)}
+        >
           Заказать такси
         </Button>
       )}

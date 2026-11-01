@@ -30,7 +30,7 @@ describe('FellowList', () => {
     expect(screen.queryByRole('img', { name: 'Нет фото' })).not.toBeInTheDocument();
   });
 
-  it('без username — нет 💬, без телефона — нет 📞', () => {
+  it('без username — нет «Написать», без телефона — нет «Позвонить»', () => {
     render(
       <FellowList
         items={[

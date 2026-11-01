@@ -219,6 +219,9 @@
 }
 
 .linkButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   margin-top: 4px;
   padding: 6px 12px;
   border: 0;

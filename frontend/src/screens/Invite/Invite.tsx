@@ -1,3 +1,4 @@
+import { ArrowRight } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect } from 'react';
 import { useNavigate, useParams } from 'react-router';
@@ -9,6 +10,7 @@ import { isInviteCode } from '../../lib/inviteCode';
 import { useBack, useIsFirstEntry, useReplace } from '../../lib/useBack';
 import { Button } from '../../ui/Button/Button';
 import { EmptyState } from '../../ui/EmptyState/EmptyState';
+import { Icon } from '../../ui/Icon/Icon';
 import { Screen } from '../../ui/Screen/Screen';
 import { ScreenHeader } from '../../ui/ScreenHeader/ScreenHeader';
 import { Skeleton } from '../../ui/Skeleton/Skeleton';
@@ -104,7 +106,7 @@ export function Invite() {
           <Skeleton height={88} />
         </div>
         <div className={styles.footer}>
-          <Button disabled arrow="→">
+          <Button disabled arrow={<Icon icon={ArrowRight} />}>
             Вступить
           </Button>
         </div>
@@ -119,7 +121,7 @@ export function Invite() {
       <Screen center>
         <EmptyState title="Мы не нашли группу" text="Проверьте код приглашения" />
         <div className={styles.footer}>
-          <Button arrow="→" onClick={onOtherCode}>
+          <Button arrow={<Icon icon={ArrowRight} />} onClick={onOtherCode}>
             Ввести другой код
           </Button>
         </div>
@@ -163,7 +165,7 @@ export function Invite() {
       </div>
       <div className={styles.footer}>
         <Button
-          arrow="→"
+          arrow={<Icon icon={ArrowRight} />}
           disabled={join.isPending}
           aria-busy={join.isPending || undefined}
           onClick={onJoin}

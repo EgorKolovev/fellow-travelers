@@ -70,7 +70,7 @@ describe('LocationPicker', () => {
     expect(screen.getByRole('button', { name: /Москва · SVO/ })).toHaveTextContent('Шереметьево');
   });
 
-  it('выбор → карточка с ✏️; «изменить» возвращает поиск', async () => {
+  it('выбор → карточка с карандашом; «изменить» возвращает поиск', async () => {
     searchLocations.mockResolvedValue([SVO, GDZ]);
     renderPicker();
 
@@ -83,7 +83,7 @@ describe('LocationPicker', () => {
     const selected = screen.getByRole('button', {
       name: /Аэропорт вылета: Москва · SVO.*Изменить/,
     });
-    expect(selected).toHaveTextContent('✏️');
+    expect(selected.querySelector('.lucide-pencil')).not.toBeNull();
     fireEvent.click(selected);
     expect(screen.getByTestId('value')).toHaveTextContent('нет');
     expect(screen.getByLabelText('Аэропорт вылета')).toHaveValue('');

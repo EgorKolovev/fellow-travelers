@@ -1,8 +1,10 @@
+import { ArrowRight } from 'lucide-react';
 import { useState } from 'react';
 import { ApiError } from '../../api/errors';
 import { Button } from '../../ui/Button/Button';
 import { Checkbox } from '../../ui/Checkbox/Checkbox';
 import { Form, FormFields, FormFooter } from '../../ui/Form/Form';
+import { Icon } from '../../ui/Icon/Icon';
 import { TextInput } from '../../ui/TextInput/TextInput';
 import {
   ADDRESS_MAX,
@@ -160,7 +162,11 @@ export function EventForm({ initial, submitLabel, onSubmit, pending = false, err
         />
       </FormFields>
       <FormFooter>
-        <Button type="submit" arrow="→" disabled={pending || datesError !== undefined}>
+        <Button
+          type="submit"
+          arrow={<Icon icon={ArrowRight} />}
+          disabled={pending || datesError !== undefined}
+        >
           {submitLabel}
         </Button>
         {message && (

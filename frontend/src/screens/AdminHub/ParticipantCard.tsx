@@ -1,9 +1,11 @@
+import { ChevronRight } from 'lucide-react';
 import type { AdminParticipant } from '../../api/types';
 import { formatTime } from '../../lib/datetime';
 import { formatBaggage, formatFlightNumber, formatName, formatWait } from '../../lib/format';
 import { APPLICATION_STATUS_LABEL } from '../../lib/status';
 import { Avatar } from '../../ui/Avatar/Avatar';
 import { ContactLinks, contactsLine } from '../../ui/FellowList/ContactLinks';
+import { Icon } from '../../ui/Icon/Icon';
 import styles from './AdminTabs.module.css';
 
 interface Props {
@@ -66,7 +68,7 @@ export function ParticipantCard({ participant, transferNumber, onOpenTransfer }:
               onClick={() => app.transfer_id && onOpenTransfer(app.transfer_id)}
             >
               {transferNumber ? `Трансфер ${transferNumber}` : 'Трансфер'}
-              <span aria-hidden="true"> →</span>
+              <Icon icon={ChevronRight} size={16} />
             </button>
           )}
         </div>

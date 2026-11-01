@@ -1,8 +1,10 @@
+import { ArrowRight } from 'lucide-react';
 import { useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router';
 import { isInviteCode } from '../../lib/inviteCode';
 import { useBack } from '../../lib/useBack';
 import { Button } from '../../ui/Button/Button';
+import { Icon } from '../../ui/Icon/Icon';
 import { Screen } from '../../ui/Screen/Screen';
 import { ScreenHeader } from '../../ui/ScreenHeader/ScreenHeader';
 import { TextInput } from '../../ui/TextInput/TextInput';
@@ -46,7 +48,7 @@ export function Join() {
           />
         </div>
         <div className={styles.footer}>
-          <Button type="submit" disabled={!valid} arrow="→">
+          <Button type="submit" disabled={!valid} arrow={<Icon icon={ArrowRight} />}>
             Далее
           </Button>
         </div>

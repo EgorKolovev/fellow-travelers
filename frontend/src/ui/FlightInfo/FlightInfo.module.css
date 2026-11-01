@@ -31,14 +31,17 @@
 }
 
 .edit {
+  display: flex;
   flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
   width: 32px;
   height: 32px;
   padding: 0;
   border: 0;
   border-radius: 50%;
   background: transparent;
-  font-size: 16px;
+  color: var(--text-accent);
   cursor: pointer;
 }
 
@@ -91,7 +94,11 @@
   align-items: center;
   gap: 8px;
   height: 32px;
-  font-size: 16px;
+}
+
+.plane {
+  flex-shrink: 0;
+  color: var(--text-pale);
 }
 
 .rule {

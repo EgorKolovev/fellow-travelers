@@ -1,3 +1,4 @@
+import { ArrowRight } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router';
 import { isUnauthorized } from '../../api/errors';
@@ -8,6 +9,7 @@ import { useBack } from '../../lib/useBack';
 import { Avatar } from '../../ui/Avatar/Avatar';
 import { Button } from '../../ui/Button/Button';
 import { Field, FieldSkeleton } from '../../ui/Field/Field';
+import { Icon } from '../../ui/Icon/Icon';
 import { Screen } from '../../ui/Screen/Screen';
 import { ScreenHeader } from '../../ui/ScreenHeader/ScreenHeader';
 import { ErrorScreen, OpenInTelegramScreen } from '../ErrorScreen/ErrorScreen';
@@ -64,7 +66,7 @@ export function ProfileForm({ onNext, notice }: Props) {
           <FieldSkeleton label="Номер телефона" />
         </div>
         <div className={styles.footer}>
-          <Button disabled arrow="→">
+          <Button disabled arrow={<Icon icon={ArrowRight} />}>
             Далее
           </Button>
         </div>
@@ -105,7 +107,7 @@ export function ProfileForm({ onNext, notice }: Props) {
         </p>
       )}
       <div className={styles.footer}>
-        <Button disabled={!me.has_phone} arrow="→" onClick={onNext}>
+        <Button disabled={!me.has_phone} arrow={<Icon icon={ArrowRight} />} onClick={onNext}>
           Далее
         </Button>
       </div>

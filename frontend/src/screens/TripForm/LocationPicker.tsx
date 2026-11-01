@@ -1,8 +1,10 @@
+import { PlaneTakeoff } from 'lucide-react';
 import { useState } from 'react';
 import { LOCATIONS_MIN_QUERY, useLocations } from '../../api/hooks';
 import type { Location } from '../../api/types';
 import { useDebounced } from '../../lib/useDebounced';
 import fieldStyles from '../../ui/Field/Field.module.css';
+import { Icon } from '../../ui/Icon/Icon';
 import { Option } from '../../ui/Option/Option';
 import { Skeleton } from '../../ui/Skeleton/Skeleton';
 import { TextInput } from '../../ui/TextInput/TextInput';
@@ -22,7 +24,7 @@ function locationTitle(location: Location): string {
   return `${location.city} · ${location.code}`;
 }
 
-/** Выбор аэропорта: поиск по городу, названию или коду; выбранный — карточка с ✏️. */
+/** Выбор аэропорта: поиск по городу, названию или коду; выбранный — карточка с карандашом. */
 export function LocationPicker({ label, value, onChange, error }: Props) {
   const [query, setQuery] = useState('');
   const debounced = useDebounced(query.trim(), LOCATION_SEARCH_DEBOUNCE_MS);
@@ -34,7 +36,7 @@ export function LocationPicker({ label, value, onChange, error }: Props) {
       <div className={fieldStyles.field}>
         <p className={fieldStyles.label}>{label}</p>
         <Option
-          leading="🛫"
+          leading={<Icon icon={PlaneTakeoff} size={24} />}
           title={locationTitle(value)}
           subtitle={value.name}
           trailing="edit"
