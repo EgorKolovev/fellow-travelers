@@ -3,9 +3,11 @@ import uuid
 from fastapi import APIRouter, Response
 
 from app.api.deps import CurrentUser, SessionDep
+from app.models import ActorKind
 from app.schemas.trip import Trip, TripInput, TripUpdate
 from app.services import trips as trips_service
 from app.services.access import get_event_for_admin, get_event_for_member
+from app.services.audit import Actor
 
 router = APIRouter(tags=["trips"])
 
@@ -32,7 +34,8 @@ async def update_trip(
     trip_id: uuid.UUID, data: TripUpdate, user: CurrentUser, session: SessionDep
 ) -> Trip:
     trip = await trips_service.get_trip_for_admin(session, trip_id, user)
-    return Trip.build(await trips_service.update_trip(session, trip, data))
+    actor = Actor(ActorKind.ADMIN, user.id)
+    return Trip.build(await trips_service.update_trip(session, trip, data, actor))
 
 
 @router.delete("/trips/{trip_id}", status_code=204)

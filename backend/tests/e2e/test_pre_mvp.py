@@ -12,10 +12,12 @@ from httpx import AsyncClient, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Application, Transfer, User
+from app.models import Application, AuditAction, AuditReason, Transfer, User
+from app.services.audit import SYSTEM, record
 from app.services.users import TelegramProfile, save_phone
 from tests.api.conftest import auth_headers
 from tests.factories import make_application, make_transfer
+from tests.helpers.audit_replay import assert_history_matches_transfers, audit_rows
 from tests.helpers.contract import assert_contract
 
 INSTRUCTION = "Встречаемся у стойки информации в терминале D, затем идём к парковке P1"
@@ -248,7 +250,8 @@ def by_name(participants: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 async def assert_invariants(session: AsyncSession, event_id: uuid.UUID) -> None:
     """Инварианты БД: assigned только с трансфером; в трансфере >= 2 заявок, <= 3 пассажиров,
-    <= 2 мест багажа; заявка входит не более чем в один трансфер."""
+    <= 2 мест багажа; заявка входит не более чем в один трансфер; история аудита восстанавливает
+    те же составы трансферов."""
     session.expire_all()
     applications = (
         await session.scalars(select(Application).where(Application.event_id == event_id))
@@ -269,6 +272,7 @@ async def assert_invariants(session: AsyncSession, event_id: uuid.UUID) -> None:
         assert len(group) >= 2
         assert sum(2 if a.with_companion else 1 for a in group) <= 3
         assert sum(a.baggage_count for a in group) <= 2
+    await assert_history_matches_transfers(session, event_id)
 
 
 # ---------------------------------------------------------------- сценарий
@@ -459,6 +463,27 @@ async def test_pre_mvp_full_scenario(api_client: AsyncClient, db_session: AsyncS
 
     await assert_invariants(s, uuid.UUID(event_id))
 
+    # История группы: что произошло, в каком порядке и по какой причине.
+    history = await audit_rows(s, uuid.UUID(event_id))
+    assert [(row.action, row.reason, row.actor_kind) for row in history] == [
+        ("application_submitted", None, "participant"),  # А
+        ("application_submitted", None, "participant"),  # Б
+        ("transfer_created", "auto_match", "system"),  # пара А + Б
+        ("application_submitted", None, "participant"),  # В
+        ("application_submitted", None, "participant"),  # Г
+        ("application_submitted", None, "participant"),  # Д
+        ("marks_changed", None, "participant"),  # А: на месте
+        ("marks_changed", None, "participant"),  # А: уехал
+        ("marks_changed", None, "participant"),  # В: уехал
+        ("application_submitted", None, "participant"),  # Эрик
+        ("transfer_left", "go_solo", "participant"),  # Б вышел
+        ("transfer_left", "member_left", "participant"),  # А уехал, остаётся solo
+        ("transfer_dissolved", "member_left", "participant"),
+    ]
+    assert history[-3].subject_user_id != history[-2].subject_user_id
+    assert history[-3].actor_user_id == history[-2].actor_user_id == history[-1].actor_user_id
+    assert history[-2].details == {"from_status": "assigned", "to_status": "solo"}
+
 
 async def test_pre_mvp_triple_leave_keeps_others_together(
     api_client: AsyncClient, db_session: AsyncSession
@@ -476,18 +501,31 @@ async def test_pre_mvp_triple_leave_keeps_others_together(
     for who in trio:
         await join(c, s, who, code)
     transfer = await make_transfer(s, event_id=uuid.UUID(event_id))
+    members = []
     for who, trip_id in zip(trio, trips, strict=True):
         user = (
             await s.execute(select(User).where(User.telegram_id == who.telegram_id))
         ).scalar_one()
-        await make_application(
-            s,
-            event_id=uuid.UUID(event_id),
-            user_id=user.id,
-            trip_id=uuid.UUID(trip_id),
-            transfer_id=transfer.id,
-            baggage_count=0,
+        members.append(
+            await make_application(
+                s,
+                event_id=uuid.UUID(event_id),
+                user_id=user.id,
+                trip_id=uuid.UUID(trip_id),
+                transfer_id=transfer.id,
+                baggage_count=0,
+            )
         )
+    # подбор строит только пары, поэтому тройку фабрикой описываем в истории так же, как сервис
+    record(
+        s,
+        event_id=uuid.UUID(event_id),
+        action=AuditAction.TRANSFER_CREATED,
+        actor=SYSTEM,
+        reason=AuditReason.AUTO_MATCH,
+        transfer_id=transfer.id,
+        details={"application_ids": [str(member.id) for member in members]},
+    )
     await assert_invariants(s, uuid.UUID(event_id))
     for who in trio:
         view = (await my_trip(c, event_id, who))["transfer"]
@@ -517,3 +555,11 @@ async def test_pre_mvp_triple_leave_keeps_others_together(
     transfers = await admin_transfers(c, event_id)
     assert member_names(transfers[0]) == ["Алиса", "Вера"]
     await assert_invariants(s, uuid.UUID(event_id))
+
+    # В истории: тройка, выход Бориса без расформирования, заявка Игоря без посадки.
+    history = await audit_rows(s, uuid.UUID(event_id))
+    assert [(row.action, row.reason) for row in history] == [
+        ("transfer_created", "auto_match"),
+        ("transfer_left", "go_solo"),
+        ("application_submitted", None),
+    ]

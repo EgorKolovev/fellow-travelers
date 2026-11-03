@@ -9,6 +9,8 @@ from sqlalchemy.orm import selectinload
 from app.errors import AppError, ErrorCode
 from app.models import (
     Application,
+    AuditAction,
+    AuditReason,
     Event,
     Location,
     LocationKind,
@@ -19,6 +21,7 @@ from app.models import (
 )
 from app.schemas.trip import TripInput, TripUpdate, normalize_number
 from app.services.access import get_event_for_member
+from app.services.audit import Actor, iso, record
 from app.timezones import from_local_or_aware
 
 _UNIQUE_VIOLATION = "23505"
@@ -32,6 +35,17 @@ ESTIMATED_ORDER = "Расчётное прибытие должно быть п�
 DUPLICATE_TRIP = "Такой рейс уже добавлен"
 
 _WITH_LOCATIONS = (selectinload(Trip.departure_location), selectinload(Trip.arrival_location))
+
+# поля рейса, чьи изменения попадают в `trip_updated.changed_fields`, в порядке модели
+_AUDITED_FIELDS = (
+    "number",
+    "departure_location_id",
+    "arrival_location_id",
+    "scheduled_departure",
+    "scheduled_arrival",
+    "estimated_arrival",
+    "source",
+)
 
 
 def _fields_error(fields: dict[str, str]) -> AppError:
@@ -153,8 +167,11 @@ async def create_trip(session: AsyncSession, event: Event, data: TripInput) -> T
     return await _load_trip(session, trip.id)
 
 
-async def update_trip(session: AsyncSession, trip: Trip, data: TripUpdate) -> Trip:
+async def update_trip(session: AsyncSession, trip: Trip, data: TripUpdate, actor: Actor) -> Trip:
+    """Исправление рейса админом; в историю пишется, только если рейс действительно изменился."""
     changes = {name: getattr(data, name) for name in data.model_fields_set}
+    before = {name: getattr(trip, name) for name in _AUDITED_FIELDS}
+    arrival_before = trip.effective_arrival
     departure, arrival = await _resolve_airports(
         session,
         changes.get("departure_location_id", trip.departure_location_id),
@@ -192,6 +209,21 @@ async def update_trip(session: AsyncSession, trip: Trip, data: TripUpdate) -> Tr
         if _violation(exc, _UNIQUE_VIOLATION, _UNIQUE_TRIP):
             raise _fields_error({"number": DUPLICATE_TRIP}) from exc
         raise
+    changed_fields = [name for name in _AUDITED_FIELDS if getattr(trip, name) != before[name]]
+    if changed_fields:
+        record(
+            session,
+            event_id=trip.event_id,
+            action=AuditAction.TRIP_UPDATED,
+            actor=actor,
+            reason=AuditReason.ADMIN_EDIT,
+            trip_id=trip.id,
+            details={
+                "changed_fields": changed_fields,
+                "effective_arrival_before": iso(arrival_before),
+                "effective_arrival_after": iso(trip.effective_arrival),
+            },
+        )
     await session.commit()
     return await _load_trip(session, trip.id)
 

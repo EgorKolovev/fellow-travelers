@@ -5,11 +5,21 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Application, ApplicationStatus, Transfer, TransferStatus
+from app.models import (
+    ActorKind,
+    Application,
+    ApplicationStatus,
+    AuditLog,
+    AuditReason,
+    Transfer,
+    TransferStatus,
+)
+from app.services.audit import Actor
 from app.services.matching import event_lock_key, leave_transfer, lock_event, match_application
 from tests.factories import make_application, make_event, make_transfer, make_trip
 
 BASE = datetime(2026, 11, 12, 5, 5, tzinfo=UTC)
+PARTICIPANT = Actor(ActorKind.PARTICIPANT, None)
 
 
 @pytest.mark.parametrize(
@@ -88,7 +98,13 @@ async def test_leave_pair_removes_transfer_and_frees_remaining(db_session: Async
     assert transfer is not None
     await db_session.refresh(leaving)
 
-    await leave_transfer(db_session, leaving, new_status=ApplicationStatus.CANCELLED)
+    await leave_transfer(
+        db_session,
+        leaving,
+        new_status=ApplicationStatus.CANCELLED,
+        actor=PARTICIPANT,
+        reason=AuditReason.CANCEL,
+    )
 
     await db_session.refresh(staying)
     assert leaving.status == ApplicationStatus.CANCELLED
@@ -108,7 +124,13 @@ async def test_leave_when_remaining_all_departed_marks_transfer_departed(
     await _app(db_session, event.id, transfer_id=transfer.id, departed_at=BASE)
     await _app(db_session, event.id, transfer_id=transfer.id, departed_at=BASE)
 
-    await leave_transfer(db_session, leaving, new_status=ApplicationStatus.SOLO)
+    await leave_transfer(
+        db_session,
+        leaving,
+        new_status=ApplicationStatus.SOLO,
+        actor=PARTICIPANT,
+        reason=AuditReason.GO_SOLO,
+    )
 
     status = await db_session.scalar(
         select(Transfer.status)
@@ -122,9 +144,16 @@ async def test_leave_without_transfer_is_noop(db_session: AsyncSession) -> None:
     event = await make_event(db_session)
     application = await _app(db_session, event.id)
 
-    await leave_transfer(db_session, application, new_status=ApplicationStatus.SOLO)
+    await leave_transfer(
+        db_session,
+        application,
+        new_status=ApplicationStatus.SOLO,
+        actor=PARTICIPANT,
+        reason=AuditReason.GO_SOLO,
+    )
 
     assert application.status == ApplicationStatus.SEARCHING
+    assert await db_session.scalar(select(func.count()).select_from(AuditLog)) == 0
 
 
 async def test_leave_pair_with_departed_remaining_makes_it_solo(db_session: AsyncSession) -> None:
@@ -134,7 +163,13 @@ async def test_leave_pair_with_departed_remaining_makes_it_solo(db_session: Asyn
     departed = await _app(db_session, event.id, transfer_id=transfer.id, departed_at=BASE)
     await _app(db_session, event.id, 1)  # свободная совместимая заявка не должна подтянуться
 
-    await leave_transfer(db_session, leaving, new_status=ApplicationStatus.CANCELLED)
+    await leave_transfer(
+        db_session,
+        leaving,
+        new_status=ApplicationStatus.CANCELLED,
+        actor=PARTICIPANT,
+        reason=AuditReason.CANCEL,
+    )
 
     assert departed.status == ApplicationStatus.SOLO
     assert departed.transfer_id is None

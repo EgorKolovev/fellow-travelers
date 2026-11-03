@@ -1,7 +1,11 @@
 from app.models.application import Application
+from app.models.audit import AuditLog
 from app.models.base import Base, TimestampMixin
 from app.models.enums import (
+    ActorKind,
     ApplicationStatus,
+    AuditAction,
+    AuditReason,
     LocationKind,
     TransferOrigin,
     TransferStatus,
@@ -16,8 +20,12 @@ from app.models.trip import Trip
 from app.models.user import User
 
 __all__ = [
+    "ActorKind",
     "Application",
     "ApplicationStatus",
+    "AuditAction",
+    "AuditLog",
+    "AuditReason",
     "Base",
     "Event",
     "Location",
