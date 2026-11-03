@@ -14,6 +14,7 @@ from app.models import (
     Transfer,
     TransferStatus,
 )
+from app.observability.metrics import MatchTrigger
 from app.services.audit import Actor
 from app.services.matching import (
     FillResult,
@@ -222,7 +223,7 @@ async def test_fill_event_joins_open_transfer_and_assembles_new_group(
     late = await _app(db_session, event.id, 105)
     alone = await _app(db_session, event.id, 1000)
 
-    result = await fill_event(db_session, event.id)
+    result = await fill_event(db_session, event.id, trigger=MatchTrigger.LEAVE)
 
     assert result == FillResult(joined=1, created=1)
     assert (joiner.status, joiner.transfer_id) == (ApplicationStatus.ASSIGNED, pair.id)
@@ -240,7 +241,9 @@ async def test_fill_event_is_idempotent(db_session: AsyncSession) -> None:
     await _app(db_session, event.id, 100)
     await _app(db_session, event.id, 105)
     await _app(db_session, event.id, 1000)
-    assert await fill_event(db_session, event.id) == FillResult(joined=1, created=1)
+    assert await fill_event(db_session, event.id, trigger=MatchTrigger.LEAVE) == FillResult(
+        joined=1, created=1
+    )
 
     async def snapshot() -> list[tuple[uuid.UUID, ApplicationStatus, uuid.UUID | None]]:
         rows = await db_session.execute(
@@ -253,7 +256,9 @@ async def test_fill_event_is_idempotent(db_session: AsyncSession) -> None:
 
     before = (await snapshot(), await db_session.scalar(select(func.count()).select_from(AuditLog)))
 
-    assert await fill_event(db_session, event.id) == FillResult(joined=0, created=0)
+    assert await fill_event(db_session, event.id, trigger=MatchTrigger.LEAVE) == FillResult(
+        joined=0, created=0
+    )
 
     after = (await snapshot(), await db_session.scalar(select(func.count()).select_from(AuditLog)))
     assert after == before
@@ -271,7 +276,9 @@ async def test_fill_event_ignores_unfit_statuses_and_other_events(
     other_first = await _app(db_session, other.id)
     other_second = await _app(db_session, other.id, 5)
 
-    assert await fill_event(db_session, event.id) == FillResult(joined=0, created=0)
+    assert await fill_event(db_session, event.id, trigger=MatchTrigger.LEAVE) == FillResult(
+        joined=0, created=0
+    )
 
     assert other_first.status == other_second.status == ApplicationStatus.SEARCHING
     assert await db_session.scalar(select(func.count()).select_from(AuditLog)) == 0

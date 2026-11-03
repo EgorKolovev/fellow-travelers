@@ -1,3 +1,4 @@
+import time
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass
@@ -24,6 +25,9 @@ from app.models import (
     TransferStatus,
     Trip,
 )
+from app.observability import metrics
+from app.observability.deferred import defer_increment, defer_observe
+from app.observability.metrics import MatchTrigger, PlacementKind
 from app.services.audit import SYSTEM, Actor, record
 
 _UINT64_RANGE = 1 << 64
@@ -120,6 +124,7 @@ async def match_application(
     application: Application,
     *,
     reason: AuditReason = AuditReason.AUTO_MATCH,
+    trigger: MatchTrigger = MatchTrigger.APPLICATION,
 ) -> Transfer | None:
     """Размещает заявку в `searching`: в открытый трансфер или в новую группу; только flush.
 
@@ -129,7 +134,9 @@ async def match_application(
     она осталась в `searching` (или не подходит для подбора).
 
     Посадка в открытый трансфер пишет `transfer_joined`, новая группа — `transfer_created`;
-    оба от системы с причиной `reason`.
+    оба от системы с причиной `reason`. `trigger` попадает только в метрики: результат и
+    длительность учитываются после commit сценария (`ft_match_placements_total`,
+    `ft_match_duration_seconds`).
     """
     if (
         application.status != ApplicationStatus.SEARCHING
@@ -137,6 +144,19 @@ async def match_application(
         or application.transfer_id is not None
     ):
         return None
+    started = time.perf_counter()
+    transfer, kind = await _place(session, application, reason)
+    defer_increment(session, metrics.match_placements_total.labels(trigger.value, kind.value))
+    defer_observe(
+        session, metrics.match_duration_seconds.labels(trigger.value), time.perf_counter() - started
+    )
+    return transfer
+
+
+async def _place(
+    session: AsyncSession, application: Application, reason: AuditReason
+) -> tuple[Transfer | None, PlacementKind]:
+    """Само размещение: трансфер, в который села заявка (или None), и вид результата."""
     own_trip = (
         await session.execute(
             select(Trip).where(Trip.id == application.trip_id),
@@ -165,7 +185,7 @@ async def match_application(
         (_candidate(app, trip) for app, trip in rows),
     )
     if decision is None:
-        return None
+        return None, PlacementKind.NONE
     if isinstance(decision, JoinTransfer):
         transfer = transfers[decision.transfer_id]
         # status и transfer_id меняются вместе: один UPDATE, CHECK assigned_has_transfer цел
@@ -181,7 +201,7 @@ async def match_application(
             application=application,
             transfer_id=transfer.id,
         )
-        return transfer
+        return transfer, PlacementKind.JOIN
     transfer = Transfer(event_id=application.event_id, origin=TransferOrigin.AUTO)
     session.add(transfer)
     await session.flush()
@@ -200,14 +220,18 @@ async def match_application(
         transfer_id=transfer.id,
         details={"application_ids": [str(member.id) for member in decision.members]},
     )
-    return transfer
+    kind = PlacementKind.NEW_TRIPLE if len(decision.members) >= 3 else PlacementKind.NEW_PAIR
+    return transfer, kind
 
 
-async def fill_event(session: AsyncSession, event_id: uuid.UUID) -> FillResult:
+async def fill_event(
+    session: AsyncSession, event_id: uuid.UUID, *, trigger: MatchTrigger
+) -> FillResult:
     """Размещает ждущие заявки группы; только flush, без commit. Вызывать под `lock_event`.
 
     Обходит заявки в `searching` без отъезда и трансфера по порядку подачи `(created_at, id)` и
-    ведёт каждую через `match_application` с причиной `auto_fill`. Заявка перед проходом читается
+    ведёт каждую через `match_application` с причиной `auto_fill`. `trigger` идёт в метрики: `leave`
+    после выхода из трансфера, `reconcile` в конце пересчёта. Заявка перед проходом читается
     заново: её могла уже посадить предыдущая (в новую группу или в трансфер). Совместимость
     замкнута по подмножествам, поэтому одного прохода хватает: повторный вызов ничего не меняет
     и ничего не пишет в историю.
@@ -233,7 +257,9 @@ async def fill_event(session: AsyncSession, event_id: uuid.UUID) -> FillResult:
         application = await session.get(Application, application_id, populate_existing=True)
         if application is None:
             continue
-        transfer = await match_application(session, application, reason=AuditReason.AUTO_FILL)
+        transfer = await match_application(
+            session, application, reason=AuditReason.AUTO_FILL, trigger=trigger
+        )
         if transfer is None:
             continue
         if transfer.id in known:
@@ -309,7 +335,7 @@ async def reconcile_event(
     survived = set(
         (await session.scalars(select(Transfer.id).where(Transfer.id.in_(transfer_ids)))).all()
     )
-    filled = await fill_event(session, event_id)
+    filled = await fill_event(session, event_id, trigger=MatchTrigger.RECONCILE)
     return ReconcileResult(
         excluded=excluded,
         dissolved=len(transfer_ids) - len(survived),
@@ -335,6 +361,10 @@ async def leave_transfer(
     В историю пишутся `transfer_left` уходящей заявки с переданными `actor` и `reason`; при
     расформировании — `transfer_left` каждой оставшейся (причина `member_left`, тот же `actor`)
     и одна `transfer_dissolved`; если оставшиеся все уехали — `transfer_departed`.
+
+    Метрики повторяют историю и растут после commit: `ft_transfer_exclusions_total` на каждую
+    запись `transfer_left` с её причиной, `ft_transfers_dissolved_total` на каждое расформирование
+    с причиной выхода, с которого оно началось (`reason`, а не `member_left` из истории).
 
     Порядок важен из-за CHECK `assigned_has_transfer` и FK без отложенной проверки: уходящая заявка
     меняет transfer_id и status одним UPDATE и флашится первой; трансфер удаляется только после
@@ -369,6 +399,7 @@ async def leave_transfer(
             "to_status": new_status.value,
         },
     )
+    defer_increment(session, metrics.transfer_exclusions_total.labels(reason.value))
 
     if len(remaining) >= 2:
         if all(app.departed_at is not None for app in remaining):
@@ -394,6 +425,9 @@ async def leave_transfer(
                 "to_status": app.status.value,
             },
         )
+        defer_increment(
+            session, metrics.transfer_exclusions_total.labels(AuditReason.MEMBER_LEFT.value)
+        )
     await session.flush()
     await session.execute(delete(Transfer).where(Transfer.id == transfer_id))
     record(
@@ -405,6 +439,7 @@ async def leave_transfer(
         transfer_id=transfer_id,
         details={"application_ids": [str(app.id) for app in remaining]},
     )
+    defer_increment(session, metrics.transfers_dissolved_total.labels(reason.value))
 
 
 async def mark_transfer_departed(

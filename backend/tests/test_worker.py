@@ -7,13 +7,17 @@ import asyncio
 import logging
 import os
 import signal
+import time
 from typing import Any
 
 import pytest
+from prometheus_client import REGISTRY
 
 import app.worker as worker
+import app.worker.__main__ as worker_main
+from app.config import get_settings
+from app.observability import metrics
 from app.services.jobs import JobOutcome
-from app.worker.__main__ import _stop_on_signals
 
 TIMEOUT = 5.0
 SESSION_FACTORY = object()
@@ -41,9 +45,33 @@ class Script:
         return result
 
 
+class QueuePolls:
+    """Подмена `observe_queue`: считает опросы; `error` заставляет его падать, как БД без связи."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.error: Exception | None = None
+
+    async def __call__(self, session_factory: Any) -> None:
+        self.calls += 1
+        if self.error is not None:
+            raise self.error
+
+
 @pytest.fixture(autouse=True)
 def fake_session_factory(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(worker, "get_session_factory", lambda: SESSION_FACTORY)
+
+
+@pytest.fixture(autouse=True)
+def queue_polls(monkeypatch: pytest.MonkeyPatch) -> QueuePolls:
+    polls = QueuePolls()
+    monkeypatch.setattr(worker, "observe_queue", polls)
+    return polls
+
+
+def last_poll() -> float:
+    return REGISTRY.get_sample_value("ft_worker_last_poll_timestamp_seconds") or 0.0
 
 
 def install(monkeypatch: pytest.MonkeyPatch, script: Script) -> None:
@@ -172,7 +200,7 @@ async def test_run_pauses_after_error_instead_of_spinning(
 async def test_signals_only_set_the_stop_event(sig: signal.Signals) -> None:
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()
-    _stop_on_signals(loop, stop)
+    worker_main._stop_on_signals(loop, stop)
     try:
         os.kill(os.getpid(), sig)
         await asyncio.wait_for(stop.wait(), TIMEOUT)
@@ -181,3 +209,103 @@ async def test_signals_only_set_the_stop_event(sig: signal.Signals) -> None:
             loop.remove_signal_handler(registered)
 
     assert stop.is_set()
+
+
+# ---------------------------------------------------------------- метрики цикла
+
+
+async def test_each_poll_snapshots_queue_and_stamps_last_poll(
+    monkeypatch: pytest.MonkeyPatch, queue_polls: QueuePolls
+) -> None:
+    script = Script(then=None)
+    install(monkeypatch, script)
+    started = time.time()
+    stop = asyncio.Event()
+    task = asyncio.ensure_future(worker.run(stop, poll_interval=0.01))
+
+    for _ in range(300):
+        if script.calls >= 3:
+            break
+        await asyncio.sleep(0.01)
+    stop.set()
+    await asyncio.wait_for(task, TIMEOUT)
+
+    assert queue_polls.calls >= 3  # снимок очереди на каждом опросе
+    assert started <= last_poll() <= time.time()
+
+
+async def test_queue_snapshot_comes_before_taking_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
+    order: list[str] = []
+
+    async def snapshot(session_factory: Any) -> None:
+        order.append("snapshot")
+
+    async def process(session_factory: Any) -> JobOutcome | None:
+        order.append("job")
+        return None
+
+    monkeypatch.setattr(worker, "observe_queue", snapshot)
+    monkeypatch.setattr(worker, "process_next", process)
+    stop = asyncio.Event()
+    task = asyncio.ensure_future(worker.run(stop, poll_interval=60))
+    for _ in range(200):
+        if len(order) >= 2:
+            break
+        await asyncio.sleep(0.01)
+    stop.set()
+    await asyncio.wait_for(task, TIMEOUT)
+
+    assert order == ["snapshot", "job"]
+
+
+async def test_last_poll_is_not_stamped_while_database_is_unreachable(
+    monkeypatch: pytest.MonkeyPatch, queue_polls: QueuePolls
+) -> None:
+    script = Script(then=None)
+    install(monkeypatch, script)
+    queue_polls.error = ConnectionRefusedError("db is down")
+    metrics.worker_last_poll_timestamp_seconds.set(0)
+    stop = asyncio.Event()
+    task = asyncio.ensure_future(worker.run(stop, poll_interval=0.01))
+
+    for _ in range(300):
+        if queue_polls.calls >= 3:
+            break
+        await asyncio.sleep(0.01)
+    stop.set()
+    await asyncio.wait_for(task, TIMEOUT)
+
+    assert queue_polls.calls >= 3
+    assert last_poll() == 0  # цикл жив, но БД не видит: healthcheck должен покраснеть
+    assert script.calls == 0
+
+
+async def test_main_starts_metrics_server_runs_worker_and_cleans_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class FakeServer:
+        def shutdown(self) -> None:
+            events.append("server shutdown")
+
+    def start_http_server(port: int) -> tuple[FakeServer, object]:
+        events.append(f"server start {port}")
+        return FakeServer(), object()
+
+    async def fake_run(stop: asyncio.Event) -> None:
+        events.append("run")
+
+    async def fake_dispose() -> None:
+        events.append("dispose")
+
+    monkeypatch.setattr(worker_main, "start_http_server", start_http_server)
+    monkeypatch.setattr(worker_main, "run", fake_run)
+    monkeypatch.setattr(worker_main, "dispose_engine", fake_dispose)
+    monkeypatch.setattr(worker_main, "configure_logging", lambda level: None)
+    monkeypatch.setattr(worker_main, "_stop_on_signals", lambda loop, stop: None)
+
+    await worker_main.main()
+
+    port = get_settings().worker_metrics_port
+    assert events == [f"server start {port}", "run", "server shutdown", "dispose"]

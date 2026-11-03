@@ -14,6 +14,7 @@ from app.models import (
     AuditLog,
     AuditReason,
 )
+from app.observability.metrics import MatchTrigger
 from app.services.audit import SYSTEM, Actor
 from app.services.matching import FillResult, fill_event, leave_transfer, match_application
 from tests.factories import make_application, make_event, make_transfer, make_trip
@@ -230,7 +231,7 @@ async def test_leave_pair_then_fill_writes_transfer_created_after_dissolution(
         "transfer_dissolved",
     ]
 
-    await fill_event(db_session, event.id)
+    await fill_event(db_session, event.id, trigger=MatchTrigger.LEAVE)
 
     rows = await audit_rows(db_session, event.id)
     assert [row.action for row in rows][-1] == "transfer_created"
@@ -291,7 +292,9 @@ async def test_fill_event_writes_auto_fill_records_and_is_idempotent(
     newcomer = await _app(db_session, event.id, 6)
     await _app(db_session, event.id, 600)  # ни с кем не совместима
 
-    assert await fill_event(db_session, event.id) == FillResult(joined=1, created=0)
+    assert await fill_event(db_session, event.id, trigger=MatchTrigger.LEAVE) == FillResult(
+        joined=1, created=0
+    )
 
     rows = await audit_rows(db_session, event.id)
     assert [_brief(row) for row in rows] == [
@@ -301,7 +304,9 @@ async def test_fill_event_writes_auto_fill_records_and_is_idempotent(
     assert (rows[-1].application_id, rows[-1].transfer_id) == (newcomer.id, pair.id)
     before = [row.id for row in rows]
 
-    assert await fill_event(db_session, event.id) == FillResult(joined=0, created=0)
+    assert await fill_event(db_session, event.id, trigger=MatchTrigger.LEAVE) == FillResult(
+        joined=0, created=0
+    )
 
     assert [row.id for row in await audit_rows(db_session, event.id)] == before
     await assert_history_matches_transfers(db_session, event.id)

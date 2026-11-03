@@ -87,6 +87,13 @@ SELECT id, event_id, kind, attempts, last_error FROM background_jobs WHERE statu
 UPDATE background_jobs SET status = 'pending', attempts = 0, run_after = now() WHERE id = '...';
 ```
 
+Метрики Prometheus воркер отдаёт на порту `WORKER_METRICS_PORT` (по умолчанию 9100), `GET /metrics`; порт
+не публикуется наружу, читать его можно из сети compose. Кроме метрик подбора (`ft_match_*`,
+`ft_transfer_*`) там есть `ft_worker_jobs_total`, `ft_worker_job_duration_seconds`, `ft_worker_queue_depth`
+(по статусам `pending` и `failed`), `ft_worker_oldest_job_age_seconds` и `ft_worker_last_poll_timestamp_seconds`.
+Счётчики растут только после commit: откатившийся пересчёт их не меняет. Healthcheck сервиса
+(`python -m app.worker.healthcheck`) успешен, если последний опрос очереди был не больше 60 секунд назад.
+
 Остановка по SIGTERM или Ctrl+C: текущее задание доводится до конца, затем процесс выходит. Несколько
 экземпляров воркера безопасны: задания делятся через `FOR UPDATE SKIP LOCKED`, а изменения одной группы
 сериализует advisory-блокировка.

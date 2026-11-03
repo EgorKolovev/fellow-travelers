@@ -16,6 +16,7 @@ from app.models import (
     TransferStatus,
     User,
 )
+from app.observability.metrics import MatchTrigger
 from app.services import applications as applications_service
 from app.services import matching as matching_service
 from tests.api.conftest import USER_TELEGRAM_ID, auth_headers
@@ -1290,9 +1291,12 @@ def fill_calls(monkeypatch: pytest.MonkeyPatch) -> list[uuid.UUID]:
     calls: list[uuid.UUID] = []
     original = matching_service.fill_event
 
-    async def spy(session: AsyncSession, event_id: uuid.UUID) -> matching_service.FillResult:
+    async def spy(
+        session: AsyncSession, event_id: uuid.UUID, *, trigger: MatchTrigger
+    ) -> matching_service.FillResult:
+        assert trigger == MatchTrigger.LEAVE  # go-solo и cancel заполняют освободившееся место
         calls.append(event_id)
-        return await original(session, event_id)
+        return await original(session, event_id, trigger=trigger)
 
     monkeypatch.setattr(applications_service, "fill_event", spy)
     return calls

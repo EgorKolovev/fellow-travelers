@@ -1,15 +1,16 @@
 """Очередь фоновых заданий: постановка в транзакции правки и выполнение одним заданием за раз."""
 
 import logging
+import time
 import uuid
 from datetime import timedelta
 from enum import StrEnum
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, extract, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models import BackgroundJob, JobKind, JobStatus
-from app.observability import context
+from app.observability import context, metrics
 from app.services.matching import lock_event, reconcile_event
 
 logger = logging.getLogger(__name__)
@@ -47,8 +48,14 @@ def enqueue_reconcile(session: AsyncSession, *, event_id: uuid.UUID, trip_id: uu
     session.add(BackgroundJob(event_id=event_id, kind=JobKind.RECONCILE_TRIP, trip_id=trip_id))
 
 
+def _observe_attempt(kind: str, outcome: JobOutcome, started: float) -> None:
+    """Учитывает завершённую попытку в метриках; вызывать только после commit."""
+    metrics.worker_jobs_total.labels(kind, outcome.value).inc()
+    metrics.worker_job_duration_seconds.labels(kind).observe(time.perf_counter() - started)
+
+
 async def _register_failure(
-    session: AsyncSession, job: BackgroundJob, exc: Exception
+    session: AsyncSession, job: BackgroundJob, exc: Exception, started: float
 ) -> JobOutcome:
     """Учитывает неудачную попытку: счётчик, пауза до повтора или `failed`; пишет лог и commit."""
     attempts = job.attempts + 1
@@ -64,6 +71,7 @@ async def _register_failure(
     kind, job_id = job.kind.value, job.id
     await session.execute(update(BackgroundJob).where(BackgroundJob.id == job_id).values(**values))
     await session.commit()
+    _observe_attempt(kind, outcome, started)
     # в сообщении нет текста исключения: он может содержать персональные данные
     extra = {"kind": kind, "outcome": outcome.value, "attempts": attempts}
     if outcome == JobOutcome.FAILED:
@@ -98,6 +106,7 @@ async def process_next(session_factory: async_sessionmaker[AsyncSession]) -> Job
         ).scalar_one_or_none()
         if job is None:
             return None
+        started = time.perf_counter()
         job_id, kind = job.id, job.kind.value
         token = context.job_id.set(job_id)
         try:
@@ -112,9 +121,10 @@ async def process_next(session_factory: async_sessionmaker[AsyncSession]) -> Job
                         ),
                     )
             except Exception as exc:
-                return await _register_failure(session, job, exc)
+                return await _register_failure(session, job, exc, started)
             await session.execute(delete(BackgroundJob).where(BackgroundJob.id == job_id))
             await session.commit()
+            _observe_attempt(kind, JobOutcome.DONE, started)
             logger.info(
                 "Пересчёт трансферов выполнен: исключено %d, расформировано %d, размещено %d",
                 result.excluded,
@@ -125,3 +135,30 @@ async def process_next(session_factory: async_sessionmaker[AsyncSession]) -> Job
             return JobOutcome.DONE
         finally:
             context.job_id.reset(token)
+
+
+async def observe_queue(session_factory: async_sessionmaker[AsyncSession]) -> None:
+    """Обновляет gauge'и очереди одним запросом: число заданий по статусам и возраст старейшего.
+
+    Возраст считается от `created_at` самого старого задания в статусе `pending` (0, если
+    очередь пуста); статусы без заданий получают 0, чтобы ряд не пропадал.
+    """
+    async with session_factory() as session:
+        rows = (
+            await session.execute(
+                select(
+                    BackgroundJob.status,
+                    func.count(),
+                    extract("epoch", func.now() - func.min(BackgroundJob.created_at)),
+                ).group_by(BackgroundJob.status)
+            )
+        ).all()
+    depth = {status: 0 for status in JobStatus}
+    oldest = 0.0
+    for status, count, age in rows:
+        depth[status] = count
+        if status == JobStatus.PENDING:
+            oldest = max(float(age), 0.0)
+    for status, count in depth.items():
+        metrics.worker_queue_depth.labels(status.value).set(count)
+    metrics.worker_oldest_job_age_seconds.set(oldest)

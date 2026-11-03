@@ -16,6 +16,7 @@ from app.models import (
     Trip,
     User,
 )
+from app.observability.metrics import MatchTrigger
 from app.schemas.application import ApplicationInput, MarksInput
 from app.services.access import is_member
 from app.services.audit import Actor, record
@@ -214,7 +215,7 @@ async def upsert_my_application(
             details={"changed_fields": changed_fields, "status": application.status.value},
         )
     if application.status == ApplicationStatus.SEARCHING:
-        await match_application(session, application)
+        await match_application(session, application, trigger=MatchTrigger.APPLICATION)
     return await _finish(session, event, user), created
 
 
@@ -230,7 +231,7 @@ async def go_solo(session: AsyncSession, event: Event, user: User) -> Applicatio
             actor=_participant(user),
             reason=AuditReason.GO_SOLO,
         )
-        await fill_event(session, event.id)
+        await fill_event(session, event.id, trigger=MatchTrigger.LEAVE)
     elif application.status != ApplicationStatus.SOLO:
         _change_status(
             session,
@@ -255,7 +256,7 @@ async def resume_search(session: AsyncSession, event: Event, user: User) -> Appl
             reason=AuditReason.RESUME_SEARCH,
         )
         await session.flush()
-        await match_application(session, application)
+        await match_application(session, application, trigger=MatchTrigger.APPLICATION)
     return await _finish(session, event, user)
 
 
@@ -272,7 +273,7 @@ async def cancel_my_application(session: AsyncSession, event: Event, user: User)
             actor=_participant(user),
             reason=AuditReason.CANCEL,
         )
-        await fill_event(session, event.id)
+        await fill_event(session, event.id, trigger=MatchTrigger.LEAVE)
     elif application.status != ApplicationStatus.CANCELLED:
         _change_status(
             session,

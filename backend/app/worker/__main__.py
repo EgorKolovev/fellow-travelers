@@ -2,6 +2,8 @@ import asyncio
 import logging
 import signal
 
+from prometheus_client import start_http_server
+
 from app.config import get_settings
 from app.db import dispose_engine
 from app.observability.logging import configure_logging
@@ -20,13 +22,17 @@ def _stop_on_signals(loop: asyncio.AbstractEventLoop, stop: asyncio.Event) -> No
 
 
 async def main() -> None:
-    configure_logging(get_settings().log_level)
+    settings = get_settings()
+    configure_logging(settings.log_level)
     stop = asyncio.Event()
     _stop_on_signals(asyncio.get_running_loop(), stop)
-    logger.info("Воркер запущен")
+    # метрики отдаёт отдельный поток; порт не публикуется наружу, его читают из сети compose
+    metrics_server, _ = start_http_server(settings.worker_metrics_port)
+    logger.info("Воркер запущен, метрики на порту %d", settings.worker_metrics_port)
     try:
         await run(stop)
     finally:
+        metrics_server.shutdown()
         await dispose_engine()
         logger.info("Воркер остановлен")
 
