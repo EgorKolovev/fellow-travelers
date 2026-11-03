@@ -7,7 +7,13 @@ from sqlalchemy import BigInteger, bindparam, delete, exists, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from app.matching import JoinTransfer, MatchCandidate, OpenTransfer, find_placement
+from app.matching import (
+    JoinTransfer,
+    MatchCandidate,
+    OpenTransfer,
+    find_placement,
+    members_to_exclude,
+)
 from app.models import (
     Application,
     ApplicationStatus,
@@ -238,6 +244,79 @@ async def fill_event(session: AsyncSession, event_id: uuid.UUID) -> FillResult:
     return FillResult(joined=joined, created=created)
 
 
+@dataclass(frozen=True, slots=True)
+class ReconcileResult:
+    """Итог `reconcile_event`: исключено заявок, расформировано трансферов, размещено заявок."""
+
+    excluded: int
+    dissolved: int
+    placed: int
+
+
+async def reconcile_event(
+    session: AsyncSession, event_id: uuid.UUID, *, changed_trip_ids: frozenset[uuid.UUID]
+) -> ReconcileResult:
+    """Приводит активные трансферы группы в соответствие с рейсами; только flush, без commit.
+
+    Вызывать под `lock_event` после правки времени прибытия или аэропорта рейсов
+    `changed_trip_ids`. Активные трансферы (любой origin) берутся по `(created_at, id)` вместе с
+    участниками и рейсами, свежими из БД. Уехавшие не исключаются и в совместимости не учитываются:
+    `members_to_exclude` получает только ждущих, а заявки на изменённых рейсах как `changed`.
+    Исключённые уходят через `leave_transfer` в `searching` от системы с причиной
+    `incompatible_after_change`; трансфер с остатком меньше двух заявок расформировывается.
+
+    Сначала исключения по всем трансферам, и только потом один `fill_event`: иначе заявка из
+    поиска села бы в трансфер, который ещё не проверен. Заполнение идёт и без исключений, потому
+    что правка могла сделать совместимой заявку в поиске. Если исключать некого и подходящих
+    заявок в поиске нет, ничего не меняется и в историю ничего не пишется, повторный вызов тоже.
+    """
+    transfer_ids = (
+        await session.scalars(
+            select(Transfer.id)
+            .where(Transfer.event_id == event_id, Transfer.status == TransferStatus.ACTIVE)
+            .order_by(Transfer.created_at, Transfer.id)
+        )
+    ).all()
+    rows = (
+        await session.execute(
+            select(Application, Trip)
+            .join(Trip, Trip.id == Application.trip_id)
+            .where(Application.transfer_id.in_(transfer_ids))
+            .order_by(Application.created_at, Application.id)
+            .execution_options(populate_existing=True)
+        )
+    ).all()
+    members: defaultdict[uuid.UUID | None, list[tuple[Application, Trip]]] = defaultdict(list)
+    for application, trip in rows:
+        members[application.transfer_id].append((application, trip))
+
+    excluded = 0
+    for transfer_id in transfer_ids:
+        waiting = [(app, trip) for app, trip in members[transfer_id] if app.departed_at is None]
+        changed = frozenset(app.id for app, _ in waiting if app.trip_id in changed_trip_ids)
+        by_id = {app.id: app for app, _ in waiting}
+        for application_id in members_to_exclude(
+            [_candidate(app, trip) for app, trip in waiting], changed
+        ):
+            await leave_transfer(
+                session,
+                by_id[application_id],
+                new_status=ApplicationStatus.SEARCHING,
+                actor=SYSTEM,
+                reason=AuditReason.INCOMPATIBLE_AFTER_CHANGE,
+            )
+            excluded += 1
+    survived = set(
+        (await session.scalars(select(Transfer.id).where(Transfer.id.in_(transfer_ids)))).all()
+    )
+    filled = await fill_event(session, event_id)
+    return ReconcileResult(
+        excluded=excluded,
+        dissolved=len(transfer_ids) - len(survived),
+        placed=filled.joined + filled.created,
+    )
+
+
 async def leave_transfer(
     session: AsyncSession,
     application: Application,
@@ -246,7 +325,7 @@ async def leave_transfer(
     actor: Actor,
     reason: AuditReason,
 ) -> None:
-    """Снимает заявку с трансфера и выставляет ей `new_status` (solo/cancelled); только flush.
+    """Снимает заявку с трансфера и выставляет ей `new_status` (solo/cancelled/searching); flush.
 
     Если в трансфере осталось меньше двух заявок, он расформировывается: оставшаяся заявка
     возвращается в `searching` (если она уже уехала, становится `solo` и не подбирается).
