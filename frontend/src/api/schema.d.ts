@@ -204,6 +204,9 @@ export interface paths {
         /**
          * Исправить рейс (только админ группы)
          * @description Поля как в TripInput, все необязательны. Запись становится source=manual.
+         *     Если изменились расчётное время прибытия или аэропорт прилёта, трансферы группы пересчитываются
+         *     в фоне за несколько секунд: заявка, которой новое время больше не подходит, выходит из трансфера
+         *     и снова ищет попутчиков. Ответ отражает только рейс.
          */
         patch: operations["updateTrip"];
         trace?: never;
@@ -453,6 +456,25 @@ export interface paths {
         put?: never;
         /** Админ отмечает отъезд всего трансфера */
         post: operations["adminMarkTransferDeparted"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/events/{event_id}/admin/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                event_id: components["parameters"]["EventId"];
+            };
+            cookie?: never;
+        };
+        /** История заявок и трансферов группы — кто, когда и почему (новые записи первыми) */
+        get: operations["adminGetHistory"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -856,6 +878,51 @@ export interface components {
                 people: number;
                 application_ids: string[];
             }[];
+        };
+        /** @enum {string} */
+        HistoryAction: "application_submitted" | "application_updated" | "status_changed" | "marks_changed" | "transfer_created" | "transfer_joined" | "transfer_left" | "transfer_dissolved" | "transfer_departed" | "trip_updated";
+        /** @enum {string} */
+        HistoryReason: "go_solo" | "cancel" | "resume_search" | "auto_match" | "auto_fill" | "incompatible_after_change" | "member_left" | "all_departed" | "admin_edit";
+        /**
+         * @description participant — сам участник, admin — создатель группы, system — сервис (подбор, пересчёт)
+         * @enum {string}
+         */
+        ActorKind: "participant" | "admin" | "system";
+        /** @description Только чтобы понять, о ком запись; без телефона и username */
+        HistoryPerson: {
+            /** Format: uuid */
+            user_id: string;
+            first_name: string;
+            last_name: string | null;
+        };
+        HistoryEntry: {
+            /** @description Растёт со временем; задаёт порядок записей */
+            seq: number;
+            /** Format: date-time */
+            occurred_at: string;
+            action: components["schemas"]["HistoryAction"];
+            /** @description null — прямое действие без отдельной причины */
+            reason: components["schemas"]["HistoryReason"] | null;
+            actor_kind: components["schemas"]["ActorKind"];
+            /** @description Кто сделал изменение; null — сервис или профиль удалён */
+            actor: components["schemas"]["HistoryPerson"] | null;
+            /** @description Чья заявка; null — запись о рейсе или трансфере целиком, либо профиль удалён */
+            subject: components["schemas"]["HistoryPerson"] | null;
+            /** Format: uuid */
+            application_id: string | null;
+            /** Format: uuid */
+            transfer_id: string | null;
+            /** Format: uuid */
+            trip_id: string | null;
+            /** @description Поля зависят от action — см. docs/contracts/README.md, раздел «История» */
+            details: {
+                [key: string]: unknown;
+            };
+        };
+        HistoryPage: {
+            items: components["schemas"]["HistoryEntry"][];
+            /** @description null — записей старше нет */
+            next_before_seq: number | null;
         };
     };
     responses: {
@@ -1681,6 +1748,36 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Transfer"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            422: components["responses"]["ValidationError"];
+        };
+    };
+    adminGetHistory: {
+        parameters: {
+            query?: {
+                limit?: number;
+                /** @description Вернуть записи старше этой — значение next_before_seq из предыдущей страницы */
+                before_seq?: number;
+            };
+            header?: never;
+            path: {
+                event_id: components["parameters"]["EventId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HistoryPage"];
                 };
             };
             401: components["responses"]["Unauthorized"];
