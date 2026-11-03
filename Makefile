@@ -1,7 +1,7 @@
 # Разработка fellow-travelers (Linux/macOS). Подробности — README.md, раздел «Разработка».
 #
 #   make dev-setup   — один раз: venv, зависимости, backend/.env, БД, миграции, аэропорты
-#   make dev         — каждый день: БД + свежие тестовые пользователи + бэкенд и фронт вместе
+#   make dev         — каждый день: БД + свежие тестовые пользователи + бэкенд, воркер и фронт вместе
 #   make check       — все проверки бэкенда и фронта
 
 SHELL := /bin/bash
@@ -20,7 +20,7 @@ DEV_USERS ?= 3
 LOCK_FLAGS := --universal --generate-hashes --python-version 3.12
 
 .DEFAULT_GOAL := help
-.PHONY: help dev-setup dev db db-stop migrate seed dev-users backend frontend check test lock lock-check
+.PHONY: help dev-setup dev db db-stop migrate seed dev-users backend worker frontend check test lock lock-check
 
 help: ## Список команд
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  make %-10s %s\n", $$1, $$2}'
@@ -71,13 +71,17 @@ dev-users: ## Тестовые пользователи с телефонами 
 backend: ## Только бэкенд: http://localhost:8000
 	cd $(BACKEND) && $(BIN)/uvicorn app.main:app --reload
 
+worker: ## Только воркер фоновых заданий (пересчёт трансферов после правки рейса)
+	cd $(BACKEND) && $(PY) -m app.worker
+
 frontend: ## Только фронт: http://localhost:5173 (/api проксируется на :8000)
 	cd $(FRONTEND) && npm run dev
 
-dev: db migrate dev-users ## Бэкенд и фронт вместе (Ctrl+C останавливает оба)
+dev: db migrate dev-users ## Бэкенд, воркер и фронт вместе (Ctrl+C останавливает все)
 	@echo "Открой http://localhost:5173 — внизу переключатель тестовых пользователей"
 	@trap 'kill 0' INT TERM EXIT; \
 	  (cd $(BACKEND) && $(BIN)/uvicorn app.main:app --reload) & \
+	  (cd $(BACKEND) && $(PY) -m app.worker) & \
 	  (cd $(FRONTEND) && npm run dev) & \
 	  wait
 

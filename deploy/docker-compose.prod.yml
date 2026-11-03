@@ -41,6 +41,20 @@ services:
       - db
     restart: always
 
+  worker:
+    container_name: worker
+    image: "${API_IMAGE}"
+    command: python -m app.worker
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://fellow:${POSTGRES_PASSWORD}@db:5432/fellow_travelers"
+      BOT_TOKEN: "${BOT_TOKEN}"
+      BOT_USERNAME: "${BOT_USERNAME}"
+      INIT_DATA_MAX_AGE_SECONDS: ${INIT_DATA_MAX_AGE_SECONDS}
+      DEBUG: "${DEBUG}"
+    depends_on:
+      - db
+    restart: always
+
   web:
     container_name: web
     image: "${WEB_IMAGE}"

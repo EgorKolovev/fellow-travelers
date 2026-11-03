@@ -70,6 +70,16 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  worker:
+    <<: *backend
+    command: ["python", "-m", "app.worker"]
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
   web:
     build:
       context: ./frontend

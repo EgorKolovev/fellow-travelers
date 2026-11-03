@@ -6,6 +6,8 @@ from app.models.enums import (
     ApplicationStatus,
     AuditAction,
     AuditReason,
+    JobKind,
+    JobStatus,
     LocationKind,
     TransferOrigin,
     TransferStatus,
@@ -14,6 +16,7 @@ from app.models.enums import (
     TripStatus,
 )
 from app.models.event import Event, Membership
+from app.models.job import BackgroundJob
 from app.models.location import Location
 from app.models.transfer import Transfer
 from app.models.trip import Trip
@@ -26,8 +29,11 @@ __all__ = [
     "AuditAction",
     "AuditLog",
     "AuditReason",
+    "BackgroundJob",
     "Base",
     "Event",
+    "JobKind",
+    "JobStatus",
     "Location",
     "LocationKind",
     "Membership",

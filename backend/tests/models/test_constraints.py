@@ -9,6 +9,7 @@ from app.models import (
     Application,
     ApplicationStatus,
     AuditLog,
+    BackgroundJob,
     Event,
     Membership,
     Transfer,
@@ -18,6 +19,7 @@ from tests.factories import (
     make_application,
     make_audit_log,
     make_event,
+    make_job,
     make_membership,
     make_transfer,
     make_trip,
@@ -136,8 +138,9 @@ async def test_event_delete_cascades(db_session: AsyncSession) -> None:
     await make_application(db_session, event_id=event.id, trip_id=trip.id, transfer_id=transfer.id)
     await make_application(db_session, event_id=event.id)
     await make_audit_log(db_session, event_id=event.id)
+    await make_job(db_session, event_id=event.id, trip_id=trip.id)
 
     await db_session.execute(delete(Event).where(Event.id == event.id))
 
-    for model in (Membership, Trip, Transfer, Application, AuditLog):
+    for model in (Membership, Trip, Transfer, Application, AuditLog, BackgroundJob):
         assert await _count(db_session, model) == 0, model.__name__

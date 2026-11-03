@@ -22,6 +22,8 @@ from app.models import (
 from app.schemas.trip import TripInput, TripUpdate, normalize_number
 from app.services.access import get_event_for_member
 from app.services.audit import Actor, iso, record
+from app.services.jobs import enqueue_reconcile
+from app.services.matching import lock_event
 from app.timezones import from_local_or_aware
 
 _UNIQUE_VIOLATION = "23505"
@@ -73,14 +75,20 @@ def _violation(exc: IntegrityError, sqlstate: str, constraint: str | None = None
 
 
 async def _load_trip(session: AsyncSession, trip_id: uuid.UUID) -> Trip:
-    """Рейс с локациями, свежий из БД (после коммита серверные поля устарели)."""
+    """Рейс с локациями, свежий из БД (после коммита серверные поля устарели).
+
+    Рейс, удалённый параллельно, — 404: админ мог удалить его, пока правка ждала блокировку.
+    """
     stmt = (
         select(Trip)
         .where(Trip.id == trip_id)
         .options(*_WITH_LOCATIONS)
         .execution_options(populate_existing=True)
     )
-    return (await session.execute(stmt)).scalar_one()
+    trip = (await session.execute(stmt)).scalar_one_or_none()
+    if trip is None:
+        raise _trip_not_found()
+    return trip
 
 
 async def list_event_trips(session: AsyncSession, event_id: uuid.UUID) -> list[Trip]:
@@ -168,7 +176,16 @@ async def create_trip(session: AsyncSession, event: Event, data: TripInput) -> T
 
 
 async def update_trip(session: AsyncSession, trip: Trip, data: TripUpdate, actor: Actor) -> Trip:
-    """Исправление рейса админом; в историю пишется, только если рейс действительно изменился."""
+    """Исправление рейса админом; в историю пишется, только если рейс действительно изменился.
+
+    Первым берётся `lock_event` группы, затем рейс перечитывается: роутер читал его до блокировки,
+    и параллельная правка могла успеть раньше. Снимок «до» для истории берётся после перечитывания.
+    Если изменилось расчётное прибытие или аэропорт прилёта, в той же транзакции ставится задание
+    пересчёта трансферов: воркер исключит заявки, которым новое время не подходит. Ошибка
+    валидации оставляет БД как была: ни правки, ни записи истории, ни задания.
+    """
+    await lock_event(session, trip.event_id)
+    trip = await _load_trip(session, trip.id)
     changes = {name: getattr(data, name) for name in data.model_fields_set}
     before = {name: getattr(trip, name) for name in _AUDITED_FIELDS}
     arrival_before = trip.effective_arrival
@@ -194,22 +211,26 @@ async def update_trip(session: AsyncSession, trip: Trip, data: TripUpdate, actor
     if estimated_arrival is not None and estimated_arrival <= scheduled_departure:
         raise _fields_error({"estimated_arrival": ESTIMATED_ORDER})
 
-    trip.departure_location_id = departure.id
-    trip.arrival_location_id = arrival.id
-    trip.scheduled_departure = scheduled_departure
-    trip.scheduled_arrival = scheduled_arrival
-    trip.estimated_arrival = estimated_arrival
-    if "number" in changes:
-        trip.number = normalize_number(changes["number"])
-    trip.source = TripSource.MANUAL
     try:
+        # правка внутри savepoint: begin_nested() сначала сбрасывает накопленное, и отказ БД
+        # при записи (дубль номера) откатил бы всю транзакцию, а не только эту правку
         async with session.begin_nested():
+            trip.departure_location_id = departure.id
+            trip.arrival_location_id = arrival.id
+            trip.scheduled_departure = scheduled_departure
+            trip.scheduled_arrival = scheduled_arrival
+            trip.estimated_arrival = estimated_arrival
+            if "number" in changes:
+                trip.number = normalize_number(changes["number"])
+            trip.source = TripSource.MANUAL
             await session.flush()
     except IntegrityError as exc:
         if _violation(exc, _UNIQUE_VIOLATION, _UNIQUE_TRIP):
             raise _fields_error({"number": DUPLICATE_TRIP}) from exc
         raise
     changed_fields = [name for name in _AUDITED_FIELDS if getattr(trip, name) != before[name]]
+    if trip.effective_arrival != arrival_before or "arrival_location_id" in changed_fields:
+        enqueue_reconcile(session, event_id=trip.event_id, trip_id=trip.id)
     if changed_fields:
         record(
             session,

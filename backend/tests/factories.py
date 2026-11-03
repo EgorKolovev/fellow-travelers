@@ -15,7 +15,9 @@ from app.models import (
     ApplicationStatus,
     AuditAction,
     AuditLog,
+    BackgroundJob,
     Event,
+    JobKind,
     Location,
     LocationKind,
     Membership,
@@ -125,3 +127,14 @@ async def make_audit_log(session: AsyncSession, **kw: Any) -> AuditLog:
     session.add(entry)
     await session.flush()
     return entry
+
+
+async def make_job(session: AsyncSession, **kw: Any) -> BackgroundJob:
+    """Задание пересчёта; без явного event_id создаёт группу."""
+    if "event_id" not in kw:
+        kw["event_id"] = (await make_event(session)).id
+    kw.setdefault("kind", JobKind.RECONCILE_TRIP)
+    job = BackgroundJob(**kw)
+    session.add(job)
+    await session.flush()
+    return job

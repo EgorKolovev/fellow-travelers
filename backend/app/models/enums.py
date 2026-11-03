@@ -70,3 +70,12 @@ class AuditReason(StrEnum):
     MEMBER_LEFT = "member_left"
     ALL_DEPARTED = "all_departed"
     ADMIN_EDIT = "admin_edit"
+
+
+class JobKind(StrEnum):
+    RECONCILE_TRIP = "reconcile_trip"
+
+
+class JobStatus(StrEnum):
+    PENDING = "pending"
+    FAILED = "failed"
