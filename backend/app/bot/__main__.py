@@ -1,5 +1,4 @@
 import asyncio
-import logging
 
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -7,6 +6,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from app.bot.handlers import router
 from app.config import get_settings
 from app.db import dispose_engine
+from app.observability.logging import configure_logging
 
 
 async def main() -> None:
@@ -22,5 +22,5 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    configure_logging(get_settings().log_level)
     asyncio.run(main())

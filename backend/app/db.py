@@ -17,7 +17,11 @@ def get_engine() -> AsyncEngine:
     global _engine
     if _engine is None:
         settings = get_settings()
-        _engine = create_async_engine(settings.database_url, echo=settings.debug)
+        # hide_parameters: значения параметров SQL (телефон, имя) не попадают ни в echo,
+        # ни в тексты исключений
+        _engine = create_async_engine(
+            settings.database_url, echo=settings.debug, hide_parameters=True
+        )
     return _engine
 
 

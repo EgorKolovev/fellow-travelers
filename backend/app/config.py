@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     bot_username: str
     init_data_max_age_seconds: int = 86400
     debug: bool = False
+    log_level: str = "INFO"
 
     @field_validator("bot_username")
     @classmethod

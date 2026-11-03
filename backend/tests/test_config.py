@@ -35,3 +35,15 @@ def test_bot_username_valid(monkeypatch: pytest.MonkeyPatch, raw: str, expected:
 def test_bot_username_invalid(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
     with pytest.raises(ValidationError, match="BOT_USERNAME"):
         make_settings(monkeypatch, raw)
+
+
+def test_log_level_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LOG_LEVEL", raising=False)
+
+    assert make_settings(monkeypatch, "my_bot1").log_level == "INFO"
+
+
+def test_log_level_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+
+    assert make_settings(monkeypatch, "my_bot1").log_level == "DEBUG"

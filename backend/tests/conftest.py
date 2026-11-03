@@ -17,7 +17,7 @@ from httpx import ASGITransport, AsyncClient
 from app.config import get_settings
 from app.main import create_app
 
-pytest_plugins = ["tests.db"]
+pytest_plugins = ["tests.db", "tests.logs"]
 
 
 @pytest.fixture

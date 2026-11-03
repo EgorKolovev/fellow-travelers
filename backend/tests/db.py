@@ -86,7 +86,8 @@ def migrated_database() -> str:
 
 @pytest.fixture(scope="session")
 async def db_engine(migrated_database: str) -> AsyncIterator[AsyncEngine]:
-    engine = create_async_engine(migrated_database)
+    # как в app.db: параметры SQL не попадают в логи и тексты исключений
+    engine = create_async_engine(migrated_database, hide_parameters=True)
     yield engine
     await engine.dispose()
 
