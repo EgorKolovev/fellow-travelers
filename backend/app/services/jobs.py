@@ -6,7 +6,7 @@ import uuid
 from datetime import timedelta
 from enum import StrEnum
 
-from sqlalchemy import delete, extract, func, select, update
+from sqlalchemy import DateTime, delete, extract, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models import BackgroundJob, JobKind, JobStatus
@@ -67,7 +67,11 @@ async def _register_failure(
     if outcome == JobOutcome.FAILED:
         values["status"] = JobStatus.FAILED
     else:
-        values["run_after"] = func.now() + retry_delay(job.attempts)
+        # clock_timestamp(), а не now(): now() — начало транзакции, то есть момент забора задания,
+        # и долгий пересчёт, упавший позже задержки, получил бы повтор сразу, без паузы
+        values["run_after"] = func.clock_timestamp(type_=DateTime(timezone=True)) + retry_delay(
+            job.attempts
+        )
     kind, job_id = job.kind.value, job.id
     await session.execute(update(BackgroundJob).where(BackgroundJob.id == job_id).values(**values))
     await session.commit()
@@ -126,7 +130,8 @@ async def process_next(session_factory: async_sessionmaker[AsyncSession]) -> Job
             await session.commit()
             _observe_attempt(kind, JobOutcome.DONE, started)
             logger.info(
-                "Пересчёт трансферов выполнен: исключено %d, расформировано %d, размещено %d",
+                "Пересчёт трансферов выполнен: исключено заявок %d, расформировано трансферов %d,"
+                " размещено заявок %d",
                 result.excluded,
                 result.dissolved,
                 result.placed,

@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -93,7 +93,10 @@ async def test_process_next_on_empty_queue_returns_none(db_session: AsyncSession
     assert await process_next(shared_session_factory(db_session)) is None
 
 
-async def test_success_applies_reconcile_and_deletes_job(db_session: AsyncSession) -> None:
+async def test_success_applies_reconcile_and_deletes_job(
+    db_session: AsyncSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
     event_id, first, second, trip = await _pair(db_session)
     trip.estimated_arrival = BASE + timedelta(minutes=30)  # ожидание 15 минут
     await db_session.flush()
@@ -116,7 +119,13 @@ async def test_success_applies_reconcile_and_deletes_job(db_session: AsyncSessio
         ("transfer_dissolved", job_id),
     ]
     assert rows[1].reason == "incompatible_after_change"
+    assert rows[1].trip_id == trip.id
     await assert_history_matches_transfers(db_session, event_id)
+    (summary,) = [r for r in caplog.records if r.name == jobs_service.__name__]
+    assert summary.getMessage() == (
+        "Пересчёт трансферов выполнен: исключено заявок 1, расформировано трансферов 1,"
+        " размещено заявок 0"
+    )
 
 
 async def test_success_without_changes_deletes_job_and_writes_nothing(
@@ -178,6 +187,15 @@ def failing_reconcile(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(jobs_service, "reconcile_event", fail)
 
 
+async def _delay_until_run(session: AsyncSession, job_id: uuid.UUID) -> timedelta:
+    """На сколько `run_after` задания позже начала транзакции теста (`now()`)."""
+    value: object = await session.scalar(
+        select(BackgroundJob.run_after - func.now()).where(BackgroundJob.id == job_id)
+    )
+    assert isinstance(value, timedelta)
+    return value
+
+
 async def _fresh_job(session: AsyncSession, job_id: uuid.UUID) -> BackgroundJob:
     stmt = (
         select(BackgroundJob)
@@ -203,10 +221,10 @@ async def test_failure_schedules_retry_and_keeps_only_class_name(
         1,
         "BoomError",
     )
-    delay = await db_session.scalar(
-        select(BackgroundJob.run_after - func.now()).where(BackgroundJob.id == job_id)
+    # пауза считается от момента ошибки (clock_timestamp), а не от начала транзакции (now)
+    assert (
+        timedelta(seconds=5) <= await _delay_until_run(db_session, job_id) < timedelta(seconds=10)
     )
-    assert delay == timedelta(seconds=5)
     (record,) = [r for r in caplog.records if r.name == jobs_service.__name__]
     assert record.levelno == logging.WARNING
     assert (record.__dict__["kind"], record.__dict__["attempts"]) == ("reconcile_trip", 1)
@@ -292,15 +310,13 @@ async def test_backoff_grows_with_attempts(
     delays = []
     for _ in range(4):
         await process_next(factory)
-        delay = await db_session.scalar(
-            select(BackgroundJob.run_after - func.now()).where(BackgroundJob.id == job_id)
-        )
-        delays.append(delay)
+        delays.append(await _delay_until_run(db_session, job_id))
         await db_session.execute(
             update(BackgroundJob).where(BackgroundJob.id == job_id).values(run_after=func.now())
         )
 
-    assert delays == [timedelta(seconds=seconds) for seconds in (5, 10, 20, 40)]
+    for delay, seconds in zip(delays, (5, 10, 20, 40), strict=True):
+        assert timedelta(seconds=seconds) <= delay < timedelta(seconds=seconds + 5)
 
 
 async def test_failed_and_future_jobs_are_skipped(db_session: AsyncSession) -> None:
@@ -324,3 +340,27 @@ async def test_job_without_trip_id_runs_reconcile_without_changed_trips(
     assert await process_next(shared_session_factory(db_session)) == JobOutcome.DONE
 
     assert await jobs_of(db_session, event.id) == []
+
+
+async def test_retry_pause_counts_from_the_error_not_from_job_pick_up(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`now()` стоит на начале транзакции: долгий пересчёт съел бы паузу, повтор пошёл бы сразу."""
+    job = await make_job(db_session)
+    job_id = job.id
+    failed_at: list[datetime] = []
+
+    async def slow_failure(session: AsyncSession, *args: Any, **kwargs: Any) -> ReconcileResult:
+        await session.execute(text("SELECT pg_sleep(0.3)"))
+        moment = await session.scalar(select(func.clock_timestamp()))
+        assert moment is not None
+        failed_at.append(moment)
+        raise BoomError(SECRET)
+
+    monkeypatch.setattr(jobs_service, "reconcile_event", slow_failure)
+
+    assert await process_next(shared_session_factory(db_session)) == JobOutcome.RETRY
+
+    run_after = (await _fresh_job(db_session, job_id)).run_after
+    assert run_after >= failed_at[0] + retry_delay(0)
+    assert run_after < failed_at[0] + retry_delay(0) + timedelta(seconds=5)

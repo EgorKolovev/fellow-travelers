@@ -16,7 +16,7 @@ from app.models import (
     JobStatus,
     Trip,
 )
-from app.observability.metrics import MatchTrigger
+from app.observability.metrics import MatchTrigger, PlacementKind
 from app.services import jobs as jobs_service
 from app.services import matching as matching_service
 from app.services.jobs import MAX_ATTEMPTS, JobOutcome, observe_queue, process_next
@@ -138,16 +138,22 @@ async def test_failed_attempt_rolls_back_subscenario_counters(
     } == snapshot
 
 
-async def test_reconcile_fill_uses_reconcile_trigger_label(db_session: AsyncSession) -> None:
+async def test_reconcile_fill_counts_no_refusals(db_session: AsyncSession) -> None:
     event_id, trip = await _delayed_pair(db_session)
     await make_job(db_session, event_id=event_id, trip_id=trip.id)
-    waiting = sample("ft_match_placements_total", trigger=MatchTrigger.RECONCILE.value, kind="none")
+    before = sum(
+        sample("ft_match_placements_total", trigger=MatchTrigger.RECONCILE.value, kind=kind.value)
+        for kind in PlacementKind
+    )
 
     await process_next(shared_session_factory(db_session))
 
-    # обе заявки пары вернулись в поиск; ни одна не нашла места
-    after = sample("ft_match_placements_total", trigger=MatchTrigger.RECONCILE.value, kind="none")
-    assert after == waiting + 2
+    # обе заявки пары вернулись в поиск и не нашли места: отказ при пересчёте не размещение
+    after = sum(
+        sample("ft_match_placements_total", trigger=MatchTrigger.RECONCILE.value, kind=kind.value)
+        for kind in PlacementKind
+    )
+    assert after == before
 
 
 # ---------------------------------------------------------------- снимок очереди

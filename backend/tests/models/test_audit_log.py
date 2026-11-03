@@ -80,6 +80,27 @@ async def test_raw_sql_is_rejected(db_session: AsyncSession, statement: str) -> 
             await db_session.execute(text(statement))
 
 
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "TRUNCATE audit_log",
+        "TRUNCATE TABLE audit_log RESTART IDENTITY",
+        "TRUNCATE events CASCADE",  # каскад по FK дотянулся бы до audit_log
+    ],
+)
+async def test_truncate_is_rejected(db_session: AsyncSession, statement: str) -> None:
+    entry = await make_audit_log(db_session)
+
+    with pytest.raises(
+        IntegrityError, match=r"audit_log доступна только для добавления \(TRUNCATE\)"
+    ):
+        async with db_session.begin_nested():
+            await db_session.execute(text(statement))
+
+    assert (await _fresh(db_session, entry.id)).id == entry.id
+    assert await _count(db_session, entry.event_id) == 1
+
+
 async def test_event_delete_cascades_to_audit_log(db_session: AsyncSession) -> None:
     event = await make_event(db_session)
     other = await make_event(db_session)

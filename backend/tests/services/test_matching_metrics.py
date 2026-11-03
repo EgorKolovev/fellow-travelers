@@ -10,11 +10,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import ActorKind, Application, ApplicationStatus, AuditReason, Trip
 from app.observability.metrics import MatchTrigger, PlacementKind
 from app.services.audit import Actor
-from app.services.matching import fill_event, leave_transfer, match_application, reconcile_event
+from app.services.matching import (
+    FillResult,
+    fill_event,
+    leave_transfer,
+    match_application,
+    reconcile_event,
+)
 from tests.factories import make_application, make_event, make_trip
 from tests.helpers.metrics import sample, total
 
 BASE = datetime(2026, 11, 12, 5, 5, tzinfo=UTC)
+PLACEMENTS = "ft_match_placements_total"
 PARTICIPANT = Actor(ActorKind.PARTICIPANT, None)
 
 
@@ -130,22 +137,57 @@ async def test_rolled_back_match_is_not_counted(db_session: AsyncSession) -> Non
     assert (total("ft_match_placements_total"), total("ft_match_duration_seconds_count")) == before
 
 
-async def test_fill_event_counts_every_pass_with_its_trigger(db_session: AsyncSession) -> None:
+@pytest.mark.parametrize("trigger", [MatchTrigger.LEAVE, MatchTrigger.RECONCILE])
+async def test_fill_event_counts_only_real_placements(
+    db_session: AsyncSession, trigger: MatchTrigger
+) -> None:
     event = await make_event(db_session)
     await _app(db_session, event.id)
     await _app(db_session, event.id, 5)
-    await _app(db_session, event.id, 600)  # ни с кем не совместима
-    pairs = placements(MatchTrigger.LEAVE, PlacementKind.NEW_PAIR)
-    waiting = placements(MatchTrigger.LEAVE, PlacementKind.NONE)
-    timed = durations(MatchTrigger.LEAVE)
+    for index in range(1, 21):
+        await _app(db_session, event.id, 1000 * index)  # ни с кем не совместимы
+    pairs = placements(trigger, PlacementKind.NEW_PAIR)
+    timed = durations(trigger)
+    before = total(PLACEMENTS)
+
+    result = await fill_event(db_session, event.id, trigger=trigger)
+    await db_session.commit()
+
+    # пара собрана; двадцать отказов в метрики не попадают: они не размещения
+    assert result == FillResult(joined=0, created=2)
+    assert placements(trigger, PlacementKind.NEW_PAIR) == pairs + 1
+    assert placements(trigger, PlacementKind.NONE) == 0
+    assert total(PLACEMENTS) == before + 1
+    assert durations(trigger) == timed + 1
+
+
+async def test_fill_event_with_nothing_to_place_counts_nothing(db_session: AsyncSession) -> None:
+    event = await make_event(db_session)
+    for index in range(10):
+        await _app(db_session, event.id, 1000 * index)
+    before = (total(PLACEMENTS), total("ft_match_duration_seconds_count"))
 
     await fill_event(db_session, event.id, trigger=MatchTrigger.LEAVE)
     await db_session.commit()
 
-    # пара собрана с первой же заявки, вторая уже не ждёт; одинокая осталась ждать
-    assert placements(MatchTrigger.LEAVE, PlacementKind.NEW_PAIR) == pairs + 1
-    assert placements(MatchTrigger.LEAVE, PlacementKind.NONE) == waiting + 1
-    assert durations(MatchTrigger.LEAVE) == timed + 2
+    assert (total(PLACEMENTS), total("ft_match_duration_seconds_count")) == before
+
+
+async def test_single_match_without_result_counts_none_only_for_application(
+    db_session: AsyncSession,
+) -> None:
+    event = await make_event(db_session)
+    lonely = await _app(db_session, event.id)
+    by_user = placements(MatchTrigger.APPLICATION, PlacementKind.NONE)
+    by_leave = placements(MatchTrigger.LEAVE, PlacementKind.NONE)
+
+    assert await match_application(db_session, lonely, trigger=MatchTrigger.LEAVE) is None
+    await db_session.commit()
+    assert placements(MatchTrigger.LEAVE, PlacementKind.NONE) == by_leave
+
+    assert await match_application(db_session, lonely) is None
+    await db_session.commit()
+    assert placements(MatchTrigger.APPLICATION, PlacementKind.NONE) == by_user + 1
 
 
 # ---------------------------------------------------------------- выходы и расформирование
@@ -254,7 +296,7 @@ async def test_reconcile_counts_exclusion_dissolution_and_reconcile_placements(
     result = await reconcile_event(db_session, event.id, changed_trip_ids=frozenset({trip.id}))
     await db_session.commit()
 
-    assert (result.excluded, result.dissolved, result.placed) == (1, 1, 1)
+    assert (result.excluded, result.dissolved, result.placed) == (1, 1, 2)
     assert exclusions(AuditReason.INCOMPATIBLE_AFTER_CHANGE) == excluded + 1
     assert dissolved(AuditReason.INCOMPATIBLE_AFTER_CHANGE) == dissolutions + 1
     assert placements(MatchTrigger.RECONCILE, PlacementKind.NEW_PAIR) == pairs + 1

@@ -225,7 +225,9 @@ async def test_fill_event_joins_open_transfer_and_assembles_new_group(
 
     result = await fill_event(db_session, event.id, trigger=MatchTrigger.LEAVE)
 
-    assert result == FillResult(joined=1, created=1)
+    # заявки, а не трансферы: одна села в пару, две собрали новую
+    assert result == FillResult(joined=1, created=2)
+    assert result.placed == 3
     assert (joiner.status, joiner.transfer_id) == (ApplicationStatus.ASSIGNED, pair.id)
     assert early.status == late.status == ApplicationStatus.ASSIGNED
     assert early.transfer_id == late.transfer_id not in (None, pair.id)
@@ -242,7 +244,7 @@ async def test_fill_event_is_idempotent(db_session: AsyncSession) -> None:
     await _app(db_session, event.id, 105)
     await _app(db_session, event.id, 1000)
     assert await fill_event(db_session, event.id, trigger=MatchTrigger.LEAVE) == FillResult(
-        joined=1, created=1
+        joined=1, created=2
     )
 
     async def snapshot() -> list[tuple[uuid.UUID, ApplicationStatus, uuid.UUID | None]]:
@@ -283,3 +285,16 @@ async def test_fill_event_ignores_unfit_statuses_and_other_events(
     assert other_first.status == other_second.status == ApplicationStatus.SEARCHING
     assert await db_session.scalar(select(func.count()).select_from(AuditLog)) == 0
     assert await db_session.scalar(select(func.count()).select_from(Transfer)) == 0
+
+
+async def test_fill_result_counts_applications_in_a_new_triple(db_session: AsyncSession) -> None:
+    event = await make_event(db_session)
+    for minutes in (0, 3, 5):
+        await _app(db_session, event.id, minutes)
+
+    result = await fill_event(db_session, event.id, trigger=MatchTrigger.LEAVE)
+
+    # один новый трансфер из трёх заявок
+    assert result == FillResult(joined=0, created=3)
+    assert result.placed == 3
+    assert await db_session.scalar(select(func.count()).select_from(Transfer)) == 1

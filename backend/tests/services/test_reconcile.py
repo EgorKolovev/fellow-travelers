@@ -194,6 +194,7 @@ async def test_third_on_other_trip_becomes_incompatible_and_leaves(
         assert (stayed.status, stayed.transfer_id) == (ApplicationStatus.ASSIGNED, transfer_id)
     left = (await audit_rows(db_session, event.id))[-1]
     assert _brief(left) == ("transfer_left", "incompatible_after_change", "system")
+    assert left.trip_id == trip.id  # по записи видно, какая правка рейса вызвала исключение
     assert left.actor_user_id is None
     assert (left.application_id, left.subject_user_id) == (third.id, third.user_id)
     assert left.transfer_id == transfer_id
@@ -243,6 +244,8 @@ async def test_pair_becomes_incompatible_and_transfer_is_dissolved(
     ]
     # изменившийся уходит первым, остаток расформированного трансфера — следом
     assert [row.application_id for row in rows[:2]] == [second.id, first.id]
+    # все записи одного выхода называют изменённый рейс
+    assert [row.trip_id for row in rows] == [trip.id] * 3
     await assert_history_matches_transfers(db_session, event.id)
     await _assert_rerun_changes_nothing(db_session, event.id, trip)
 
@@ -262,7 +265,8 @@ async def test_dissolved_pair_members_are_seated_from_search(db_session: AsyncSe
     result = await _reconcile(db_session, event.id, trip)
 
     # первая и ждущая собираются в новую пару, вторая (на сдвинутом рейсе) остаётся в поиске
-    assert result == ReconcileResult(excluded=1, dissolved=1, placed=1)
+    # две заявки (первая и ждущая) собрались в новую пару: placed считает заявки, не трансферы
+    assert result == ReconcileResult(excluded=1, dissolved=1, placed=2)
     assert first.status == waiting.status == ApplicationStatus.ASSIGNED
     assert first.transfer_id == waiting.transfer_id not in (None, pair.id)
     assert (second.status, second.transfer_id) == (ApplicationStatus.SEARCHING, None)
@@ -327,6 +331,14 @@ async def test_all_transfers_are_checked_before_filling(db_session: AsyncSession
     result = await _reconcile(db_session, event.id, third_trip, right_trip)
 
     assert result == ReconcileResult(excluded=2, dissolved=1, placed=0)
+    # причин две, и записи не называют ни одну из них
+    exclusion_rows = [
+        row
+        for row in await audit_rows(db_session, event.id)
+        if row.reason == "incompatible_after_change"
+    ]
+    assert len(exclusion_rows) == 2
+    assert {row.trip_id for row in exclusion_rows} == {None}
     assert third.status == left.status == right.status == ApplicationStatus.SEARCHING
     transfer_ids = set(
         (await db_session.scalars(select(Transfer.id).where(Transfer.event_id == event.id))).all()

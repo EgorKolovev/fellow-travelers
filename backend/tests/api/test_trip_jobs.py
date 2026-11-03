@@ -256,6 +256,7 @@ async def test_delay_patch_then_worker_excludes_member_and_history_shows_it(
     excluded = [item for item in left if item["reason"] == "incompatible_after_change"]
     assert len(excluded) == 1
     assert excluded[0]["actor_kind"] == "system"
+    assert excluded[0]["trip_id"] == trip_id  # видно, какая правка рейса вызвала исключение
     assert excluded[0]["actor"] is None
     assert excluded[0]["subject"]["user_id"] != str(admin.id)
     assert items[0]["action"] == "transfer_dissolved"  # самая свежая запись

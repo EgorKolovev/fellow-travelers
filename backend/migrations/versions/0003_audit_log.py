@@ -1,7 +1,7 @@
 """audit log
 
-История изменений группы: таблица только для добавления. UPDATE и DELETE отклоняет триггер.
-Каскад от events и SET NULL от users выполняются внутри системных триггеров ссылочной
+История изменений группы: таблица только для добавления. UPDATE, DELETE и TRUNCATE отклоняет
+триггер. Каскад от events и SET NULL от users выполняются внутри системных триггеров ссылочной
 целостности, то есть на глубине `pg_trigger_depth()` не меньше 2, и триггер их пропускает.
 
 Revision ID: 0003
@@ -25,8 +25,9 @@ _FORBID_CHANGE_FUNCTION = """
 CREATE FUNCTION audit_log_forbid_change() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
-    -- прямой UPDATE/DELETE: триггер на глубине 1; каскадные действия FK идут глубже
-    IF pg_trigger_depth() < 2 THEN
+    -- прямой UPDATE/DELETE: триггер на глубине 1; каскадные действия FK идут глубже.
+    -- TRUNCATE запрещён всегда: он стирает всю историю разом и каскадов не имеет
+    IF TG_OP = 'TRUNCATE' OR pg_trigger_depth() < 2 THEN
         RAISE EXCEPTION 'audit_log доступна только для добавления (%)', TG_OP
             USING ERRCODE = 'restrict_violation';
     END IF;
@@ -42,6 +43,12 @@ _FORBID_CHANGE_TRIGGER = """
 CREATE TRIGGER audit_log_append_only
 BEFORE UPDATE OR DELETE ON audit_log
 FOR EACH ROW EXECUTE FUNCTION audit_log_forbid_change()
+"""
+
+_FORBID_TRUNCATE_TRIGGER = """
+CREATE TRIGGER audit_log_no_truncate
+BEFORE TRUNCATE ON audit_log
+FOR EACH STATEMENT EXECUTE FUNCTION audit_log_forbid_change()
 """
 
 
@@ -144,9 +151,12 @@ def upgrade() -> None:
     op.create_index("ix_audit_log_event_id_id", "audit_log", ["event_id", "id"], unique=False)
     op.execute(_FORBID_CHANGE_FUNCTION)
     op.execute(_FORBID_CHANGE_TRIGGER)
+    op.execute(_FORBID_TRUNCATE_TRIGGER)
 
 
 def downgrade() -> None:
+    # IF EXISTS: базы, где 0003 накатили до появления этого триггера, откатываются без ошибки
+    op.execute("DROP TRIGGER IF EXISTS audit_log_no_truncate ON audit_log")
     op.execute("DROP TRIGGER audit_log_append_only ON audit_log")
     op.execute("DROP FUNCTION audit_log_forbid_change()")
     op.drop_index("ix_audit_log_event_id_id", table_name="audit_log")

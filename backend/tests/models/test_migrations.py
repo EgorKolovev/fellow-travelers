@@ -109,7 +109,7 @@ async def test_audit_log_trigger_and_function_exist_at_head(db_engine: AsyncEngi
     table, triggers, functions = await _audit_log_objects(db_engine)
 
     assert table
-    assert triggers == {"audit_log_append_only"}
+    assert triggers == {"audit_log_append_only", "audit_log_no_truncate"}
     assert functions == {"audit_log_forbid_change"}
 
 
@@ -134,7 +134,7 @@ async def test_audit_log_downgrade_drops_table_trigger_and_function_then_upgrade
         table, triggers, functions = await _audit_log_objects(db_engine)
         assert (table, triggers, functions) == (
             True,
-            {"audit_log_append_only"},
+            {"audit_log_append_only", "audit_log_no_truncate"},
             {"audit_log_forbid_change"},
         )
         async with db_engine.connect() as connection:
