@@ -9,6 +9,7 @@ SHELL := /bin/bash
 BACKEND  := backend
 FRONTEND := frontend
 VENV     := $(BACKEND)/.venv
+VENV_OK  := $(VENV)/.installed
 PY       := $(CURDIR)/$(VENV)/bin/python
 BIN      := $(CURDIR)/$(VENV)/bin
 COMPOSE  := docker compose
@@ -16,18 +17,30 @@ COMPOSE  := docker compose
 # Сколько тестовых пользователей создавать (1..5).
 DEV_USERS ?= 3
 
+LOCK_FLAGS := --universal --generate-hashes --python-version 3.12
+
 .DEFAULT_GOAL := help
-.PHONY: help dev-setup dev db db-stop migrate seed dev-users backend frontend check test
+.PHONY: help dev-setup dev db db-stop migrate seed dev-users backend frontend check test lock lock-check
 
 help: ## Список команд
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  make %-10s %s\n", $$1, $$2}'
 
-dev-setup: $(VENV) $(BACKEND)/.env $(FRONTEND)/node_modules db migrate seed dev-users ## Один раз: всё для разработки
+dev-setup: $(VENV_OK) $(BACKEND)/.env $(FRONTEND)/node_modules db migrate seed dev-users ## Один раз: всё для разработки
 	@echo "Готово. Запуск: make dev"
 
-$(VENV):
-	python3.12 -m venv $(VENV)
-	unset CURL_CA_BUNDLE; $(PY) -m pip install -q -e "$(BACKEND)[dev]"
+# Метка, а не каталог: новый lock-файл переустанавливает зависимости.
+$(VENV_OK): $(BACKEND)/requirements-dev.lock
+	test -d $(VENV) || python3.12 -m venv $(VENV)
+	unset CURL_CA_BUNDLE; $(PY) -m pip install -q --require-hashes --no-deps -r $(BACKEND)/requirements-dev.lock
+	unset CURL_CA_BUNDLE; $(PY) -m pip install -q --no-deps -e $(BACKEND)
+	@touch $@
+
+lock: ## Обновить backend/requirements*.lock из pyproject.toml (нужен uv)
+	cd $(BACKEND) && uv pip compile pyproject.toml $(LOCK_FLAGS) -q -o requirements.lock
+	cd $(BACKEND) && uv pip compile pyproject.toml --extra dev $(LOCK_FLAGS) -c requirements.lock -q -o requirements-dev.lock
+
+lock-check: lock ## Lock-файлы соответствуют pyproject.toml (нужно закоммиченное дерево)
+	git diff --exit-code -- $(BACKEND)/requirements.lock $(BACKEND)/requirements-dev.lock
 
 # .env для разработки без Telegram: токен любой строкой, initData живёт неделю.
 $(BACKEND)/.env:
@@ -68,10 +81,10 @@ dev: db migrate dev-users ## Бэкенд и фронт вместе (Ctrl+C о�
 	  (cd $(FRONTEND) && npm run dev) & \
 	  wait
 
-test: db ## Тесты бэкенда и фронта
+test: $(VENV_OK) $(FRONTEND)/node_modules db ## Тесты бэкенда и фронта
 	cd $(BACKEND) && $(BIN)/pytest -q -W error
 	cd $(FRONTEND) && npm test
 
-check: db ## Все проверки: ruff, mypy, pytest; lint, format, typecheck, test, build, check:api
+check: $(VENV_OK) $(FRONTEND)/node_modules db ## Все проверки: ruff, mypy, pytest; lint, format, typecheck, test, build, check:api
 	cd $(BACKEND) && $(BIN)/ruff check . && $(BIN)/ruff format --check . && $(BIN)/mypy && $(BIN)/pytest -q -W error
 	cd $(FRONTEND) && npm run lint && npm run format:check && npm run typecheck && npm test && npm run build && npm run check:api

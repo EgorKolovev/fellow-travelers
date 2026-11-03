@@ -6,9 +6,13 @@ FastAPI + SQLAlchemy (async) + PostgreSQL. Контракт API: `../docs/contra
 
 ```bash
 python -m venv .venv
-.venv/Scripts/python -m pip install -e ".[dev]"   # Linux/macOS: .venv/bin/python
+.venv/Scripts/python -m pip install --require-hashes --no-deps -r requirements-dev.lock   # Linux/macOS: .venv/bin/python
+.venv/Scripts/python -m pip install --no-deps -e .
 cp .env.example .env                              # и заполнить значения
 ```
+
+Точные версии с хешами лежат в `requirements.lock` (образ) и `requirements-dev.lock` (разработка и CI). В
+`pyproject.toml` остаются диапазоны. После их правки выполните `make lock` из корня репозитория и закоммитьте результат.
 
 ## База данных
 

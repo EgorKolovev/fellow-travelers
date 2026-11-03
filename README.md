@@ -31,7 +31,8 @@ make dev         # каждый раз: бэкенд (:8000) и фронт (:517
 | `make backend` / `make frontend` | Запустить только одну часть |
 | `make db` / `make db-stop` | Поднять / остановить Postgres (данные сохраняются в volume) |
 | `make migrate`, `make seed` | Миграции, справочник аэропортов |
-| `make test`, `make check` | Тесты; все проверки бэкенда и фронта (как перед коммитом) |
+| `make test`, `make check` | Тесты; все проверки бэкенда и фронта (как перед коммитом и в CI) |
+| `make lock`, `make lock-check` | Обновить и проверить `backend/requirements*.lock` после правки зависимостей в `pyproject.toml` (нужен uv) |
 
 Как это устроено: бэкенд принимает только initData, подписанную `BOT_TOKEN`. В dev токен — любая строка
 (`dev-token` в `backend/.env`), а `make dev-users` (`python -m app.dev.users`) создаёт пользователей в БД и подписывает
