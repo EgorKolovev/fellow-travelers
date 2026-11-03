@@ -106,3 +106,19 @@ UPDATE background_jobs SET status = 'pending', attempts = 0, run_after = now() W
 # в compose: docker compose run --rm api alembic upgrade head
 .venv/Scripts/python -m app.seeds.locations   # справочник аэропортов из data/airports.csv (идемпотентно)
 ```
+
+## Откат релиза в проде
+
+Контейнер `api` при старте выполняет `alembic upgrade head`. Старый образ не знает новых ревизий, поэтому
+после простого revert он падает с «Can't locate revision» и перезапускается по кругу. Схему нужно откатить
+**до** revert, пока на ВМ работает новый образ.
+
+1. Сохранить дамп: `sudo docker exec db pg_dump -U fellow -d fellow_travelers | gzip > ~/pre-rollback.sql.gz`.
+2. Откатить схему новым образом до ревизии старого релиза (для релиза с историей и воркером — `0002`):
+   `sudo docker exec api alembic downgrade 0002`. Таблицы `audit_log` и `background_jobs` удаляются вместе
+   с данными: история с момента обновления пропадёт, она остаётся только в дампе.
+3. Сделать revert слияния в `main` и запушить: деплой соберёт и поставит старые образы.
+4. Проверить: `curl -s -o /dev/null -w '%{http_code}' https://<сайт>/api/v1/me` даёт 401, а не 502.
+
+Заявки и трансферы при откате схемы не меняются. Составы, которые воркер успел дополнить или разбить, остаются
+такими же и после отката.
