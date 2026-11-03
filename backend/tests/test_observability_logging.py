@@ -136,7 +136,9 @@ def test_exception_fields() -> None:
     assert "\n" not in line
     assert data["exc_type"] == "ValueError"
     assert data["traceback"].startswith("Traceback (most recent call last):")
-    assert "ValueError: boom" in data["traceback"]
+    assert "test_exception_fields" in data["traceback"]  # кадр стека
+    assert "ValueError" in data["traceback"]  # имя класса
+    assert "ValueError:" not in data["traceback"]  # после имени класса текста исключения нет
 
 
 def test_no_exception_fields_without_exception() -> None:

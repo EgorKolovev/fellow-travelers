@@ -3,6 +3,7 @@
 История изменений группы: таблица только для добавления. UPDATE, DELETE и TRUNCATE отклоняет
 триггер. Каскад от events и SET NULL от users выполняются внутри системных триггеров ссылочной
 целостности, то есть на глубине `pg_trigger_depth()` не меньше 2, и триггер их пропускает.
+Для трансферов, которые уже есть в БД, вставляются записи transfer_created (базовая история).
 
 Revision ID: 0003
 Revises: 0002
@@ -43,6 +44,30 @@ _FORBID_CHANGE_TRIGGER = """
 CREATE TRIGGER audit_log_append_only
 BEFORE UPDATE OR DELETE ON audit_log
 FOR EACH ROW EXECUTE FUNCTION audit_log_forbid_change()
+"""
+
+# Трансферы, собранные до появления истории, получают запись transfer_created: без неё состав,
+# восстановленный по истории, не включал бы их участников, и посадка третьего или выход одного
+# дали бы неверный результат. Состав — заявки, которые сейчас ссылаются на трансфер.
+_BASELINE_HISTORY = """
+INSERT INTO audit_log (event_id, occurred_at, action, reason, actor_kind, transfer_id, details)
+SELECT t.event_id,
+       t.created_at,
+       'transfer_created',
+       NULL,
+       'system',
+       t.id,
+       jsonb_build_object(
+           'application_ids',
+           COALESCE(
+               (SELECT jsonb_agg(a.id::text ORDER BY a.created_at, a.id)
+                  FROM applications a
+                 WHERE a.transfer_id = t.id),
+               '[]'::jsonb
+           )
+       )
+  FROM transfers t
+ ORDER BY t.created_at, t.id
 """
 
 _FORBID_TRUNCATE_TRIGGER = """
@@ -152,6 +177,7 @@ def upgrade() -> None:
     op.execute(_FORBID_CHANGE_FUNCTION)
     op.execute(_FORBID_CHANGE_TRIGGER)
     op.execute(_FORBID_TRUNCATE_TRIGGER)
+    op.execute(_BASELINE_HISTORY)
 
 
 def downgrade() -> None:

@@ -160,11 +160,11 @@ async def test_reconcile_fill_counts_no_refusals(db_session: AsyncSession) -> No
 
 
 async def test_observe_queue_sets_depth_and_oldest_age(db_session: AsyncSession) -> None:
-    event = await make_event(db_session)
+    event, other = await make_event(db_session), await make_event(db_session)
     now = await db_session.scalar(select(func.now()))
     assert now is not None
     await make_job(db_session, event_id=event.id, created_at=now - timedelta(seconds=90))
-    await make_job(db_session, event_id=event.id, created_at=now - timedelta(seconds=10))
+    await make_job(db_session, event_id=other.id, created_at=now - timedelta(seconds=10))
     await make_job(db_session, event_id=event.id, status=JobStatus.FAILED, attempts=8)
     # у failed возраст не учитывается, даже если оно старше всех pending
     await make_job(

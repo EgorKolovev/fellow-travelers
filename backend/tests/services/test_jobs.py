@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 from sqlalchemy import func, select, text, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -57,18 +58,82 @@ def test_retry_delay_doubles_and_is_capped(attempts: int, seconds: int) -> None:
     assert retry_delay(attempts) == timedelta(seconds=seconds)
 
 
-async def test_enqueue_only_adds_to_the_session(db_session: AsyncSession) -> None:
+async def test_enqueue_adds_pending_job_in_the_callers_transaction(
+    db_session: AsyncSession,
+) -> None:
     event = await make_event(db_session)
     trip_id = uuid.uuid4()
 
-    enqueue_reconcile(db_session, event_id=event.id, trip_id=trip_id)
-
-    (pending,) = [obj for obj in db_session.new if isinstance(obj, BackgroundJob)]
-    assert (pending.event_id, pending.trip_id, pending.kind) == (
-        event.id,
-        trip_id,
+    savepoint = await db_session.begin_nested()
+    await enqueue_reconcile(db_session, event_id=event.id, trip_id=trip_id)
+    (job,) = await jobs_of(db_session, event.id)
+    assert (job.status, job.kind, job.trip_id) == (
+        JobStatus.PENDING,
         JobKind.RECONCILE_TRIP,
+        trip_id,
     )
+
+    await savepoint.rollback()
+
+    # откат транзакции вызывающего уносит и задание
+    assert await jobs_of(db_session, event.id) == []
+
+
+async def test_second_enqueue_merges_into_the_pending_job(db_session: AsyncSession) -> None:
+    event = await make_event(db_session)
+    first_trip, second_trip = uuid.uuid4(), uuid.uuid4()
+
+    await enqueue_reconcile(db_session, event_id=event.id, trip_id=first_trip)
+    await enqueue_reconcile(db_session, event_id=event.id, trip_id=second_trip)
+
+    (job,) = await jobs_of(db_session, event.id)
+    assert job.trip_id == first_trip  # при слиянии trip_id остаётся от первой правки
+
+
+async def test_enqueue_in_other_group_is_not_merged(db_session: AsyncSession) -> None:
+    first, second = await make_event(db_session), await make_event(db_session)
+
+    await enqueue_reconcile(db_session, event_id=first.id, trip_id=uuid.uuid4())
+    await enqueue_reconcile(db_session, event_id=second.id, trip_id=uuid.uuid4())
+
+    assert len(await jobs_of(db_session, first.id)) == 1
+    assert len(await jobs_of(db_session, second.id)) == 1
+
+
+async def test_failed_job_does_not_block_a_new_pending_one(db_session: AsyncSession) -> None:
+    event = await make_event(db_session)
+    await make_job(db_session, event_id=event.id, status=JobStatus.FAILED, attempts=MAX_ATTEMPTS)
+
+    await enqueue_reconcile(db_session, event_id=event.id, trip_id=uuid.uuid4())
+    await enqueue_reconcile(db_session, event_id=event.id, trip_id=uuid.uuid4())
+
+    jobs = await jobs_of(db_session, event.id)
+    assert sorted(job.status for job in jobs) == [JobStatus.FAILED, JobStatus.PENDING]
+
+
+async def test_new_pending_job_is_possible_once_the_old_one_is_done(
+    db_session: AsyncSession,
+) -> None:
+    event = await make_event(db_session)
+    await enqueue_reconcile(db_session, event_id=event.id, trip_id=uuid.uuid4())
+    assert await process_next(shared_session_factory(db_session)) == JobOutcome.DONE
+
+    await enqueue_reconcile(db_session, event_id=event.id, trip_id=uuid.uuid4())
+
+    assert len(await jobs_of(db_session, event.id)) == 1
+
+
+async def test_database_forbids_two_pending_jobs_of_one_kind(db_session: AsyncSession) -> None:
+    event = await make_event(db_session)
+    await make_job(db_session, event_id=event.id)
+
+    with pytest.raises(IntegrityError, match="uq_background_jobs_event_kind_pending"):
+        async with db_session.begin_nested():
+            await make_job(db_session, event_id=event.id)
+
+    # а несколько failed подряд индекс допускает
+    await make_job(db_session, event_id=event.id, status=JobStatus.FAILED)
+    await make_job(db_session, event_id=event.id, status=JobStatus.FAILED)
 
 
 # ---------------------------------------------------------------- успех
@@ -151,11 +216,12 @@ async def test_second_job_for_same_trip_changes_nothing(db_session: AsyncSession
     trip.estimated_arrival = BASE + timedelta(minutes=30)
     await db_session.flush()
     await make_job(db_session, event_id=event_id, trip_id=trip.id)
-    await make_job(db_session, event_id=event_id, trip_id=trip.id)
     factory = shared_session_factory(db_session)
 
     assert await process_next(factory) == JobOutcome.DONE
     rows_before = len(await audit_rows(db_session, event_id))
+    # то же задание приходит снова (повторная доставка): первое уже выполнено и удалено
+    await make_job(db_session, event_id=event_id, trip_id=trip.id)
     assert await process_next(factory) == JobOutcome.DONE
 
     assert len(await audit_rows(db_session, event_id)) == rows_before
@@ -163,17 +229,18 @@ async def test_second_job_for_same_trip_changes_nothing(db_session: AsyncSession
 
 
 async def test_jobs_are_taken_oldest_first(db_session: AsyncSession) -> None:
-    event = await make_event(db_session)
+    later, earlier = await make_event(db_session), await make_event(db_session)
     now = await db_session.scalar(select(func.now()))
     assert now is not None
-    late = await make_job(db_session, event_id=event.id, run_after=now - timedelta(minutes=1))
-    await make_job(db_session, event_id=event.id, run_after=now - timedelta(hours=1))
+    late = await make_job(db_session, event_id=later.id, run_after=now - timedelta(minutes=1))
+    await make_job(db_session, event_id=earlier.id, run_after=now - timedelta(hours=1))
     factory = shared_session_factory(db_session)
 
     assert await process_next(factory) == JobOutcome.DONE
-    assert [job.id for job in await jobs_of(db_session, event.id)] == [late.id]
+    assert await jobs_of(db_session, earlier.id) == []
+    assert [job.id for job in await jobs_of(db_session, later.id)] == [late.id]
     assert await process_next(factory) == JobOutcome.DONE
-    assert await jobs_of(db_session, event.id) == []
+    assert await jobs_of(db_session, later.id) == []
 
 
 # ---------------------------------------------------------------- ошибка

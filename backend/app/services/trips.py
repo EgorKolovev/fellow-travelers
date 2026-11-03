@@ -230,7 +230,7 @@ async def update_trip(session: AsyncSession, trip: Trip, data: TripUpdate, actor
         raise
     changed_fields = [name for name in _AUDITED_FIELDS if getattr(trip, name) != before[name]]
     if trip.effective_arrival != arrival_before or "arrival_location_id" in changed_fields:
-        enqueue_reconcile(session, event_id=trip.event_id, trip_id=trip.id)
+        await enqueue_reconcile(session, event_id=trip.event_id, trip_id=trip.id)
     if changed_fields:
         record(
             session,

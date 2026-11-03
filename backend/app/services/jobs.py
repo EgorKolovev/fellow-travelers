@@ -6,7 +6,8 @@ import uuid
 from datetime import timedelta
 from enum import StrEnum
 
-from sqlalchemy import DateTime, delete, extract, func, select, update
+from sqlalchemy import DateTime, delete, extract, func, select, text, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models import BackgroundJob, JobKind, JobStatus
@@ -39,13 +40,33 @@ def retry_delay(attempts: int) -> timedelta:
     return timedelta(seconds=min(_RETRY_BASE_SECONDS * 2**attempts, _RETRY_MAX_SECONDS))
 
 
-def enqueue_reconcile(session: AsyncSession, *, event_id: uuid.UUID, trip_id: uuid.UUID) -> None:
-    """Ставит пересчёт трансферов группы после правки рейса: только `session.add`.
+async def enqueue_reconcile(
+    session: AsyncSession, *, event_id: uuid.UUID, trip_id: uuid.UUID
+) -> None:
+    """Ставит пересчёт трансферов группы после правки рейса; без commit.
 
-    Задание живёт в транзакции вызывающего: откатилась правка — нет и задания, прошёл commit —
-    задание не потеряется.
+    Вызывать под `lock_event` группы, в транзакции правки: откатилась правка — нет и задания,
+    прошёл commit — задание не потеряется. Ожидающее задание на группу одно (уникальный частичный
+    индекс): если оно уже есть, `ON CONFLICT DO NOTHING` ничего не делает, и новая правка сливается
+    с ним. Пересчёт читает состояние группы после блокировки, поэтому видит и эту правку.
+
+    Ограничение слияния: `trip_id` остаётся от первой правки. Пересчёт всё равно проверяет все
+    активные трансферы группы, от `trip_id` зависят только tie-break при исключении и `trip_id` в
+    записях истории.
+
+    DO NOTHING, а не DO UPDATE: воркер держит строку задания `FOR UPDATE` и ждёт `lock_event`,
+    который держит производитель, и UPDATE этой строки дал бы взаимную блокировку. DO NOTHING на
+    блокировку строки не ждёт. Задание в статусе `failed` новому не мешает.
     """
-    session.add(BackgroundJob(event_id=event_id, kind=JobKind.RECONCILE_TRIP, trip_id=trip_id))
+    await session.execute(
+        insert(BackgroundJob)
+        .values(event_id=event_id, kind=JobKind.RECONCILE_TRIP, trip_id=trip_id)
+        .on_conflict_do_nothing(
+            index_elements=[BackgroundJob.event_id, BackgroundJob.kind],
+            # литерал, а не параметр: по параметру Postgres не подберёт частичный индекс
+            index_where=text(f"status = '{JobStatus.PENDING.value}'"),
+        )
+    )
 
 
 def _observe_attempt(kind: str, outcome: JobOutcome, started: float) -> None:
@@ -76,7 +97,8 @@ async def _register_failure(
     await session.execute(update(BackgroundJob).where(BackgroundJob.id == job_id).values(**values))
     await session.commit()
     _observe_attempt(kind, outcome, started)
-    # в сообщении нет текста исключения: он может содержать персональные данные
+    # текст исключения может содержать персональные данные (значения строк в ошибках БД), поэтому
+    # в сообщение он не попадает, а форматтер JSON-логов пишет в traceback только кадры стека
     extra = {"kind": kind, "outcome": outcome.value, "attempts": attempts}
     if outcome == JobOutcome.FAILED:
         logger.error("Задание не выполнено, повторов больше нет", extra=extra, exc_info=exc)

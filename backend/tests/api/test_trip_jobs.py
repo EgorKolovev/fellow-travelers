@@ -19,7 +19,14 @@ from tests.api.conftest import USER_TELEGRAM_ID
 from tests.api.test_applications import apply, get_app, join
 from tests.api.test_history import get_history, items_of
 from tests.api.test_trips import patch_trip
-from tests.factories import get_location, make_event, make_membership, make_trip, make_user
+from tests.factories import (
+    get_location,
+    make_event,
+    make_job,
+    make_membership,
+    make_trip,
+    make_user,
+)
 from tests.helpers.audit_replay import audit_rows
 from tests.helpers.jobs import job_count, jobs_of, shared_session_factory
 
@@ -141,15 +148,33 @@ async def test_patch_with_same_values_does_not_enqueue(
     assert [row.action for row in await audit_rows(db_session, event.id)] == []
 
 
-async def test_each_changing_patch_enqueues_its_own_job(
+async def test_consecutive_patches_share_one_pending_job(
     api_client: AsyncClient, db_session: AsyncSession, event: Event
 ) -> None:
     trip = await make_trip(db_session, event_id=event.id)
+    other = await make_trip(db_session, event_id=event.id)
 
     await patch_trip(api_client, trip.id, {"estimated_arrival": "2026-11-12T09:15:00"})
     await patch_trip(api_client, trip.id, {"estimated_arrival": "2026-11-12T09:30:00"})
+    await patch_trip(api_client, other.id, {"estimated_arrival": "2026-11-12T09:45:00"})
 
-    assert len(await jobs_of(db_session, event.id)) == 2
+    (job,) = await jobs_of(db_session, event.id)
+    assert job.trip_id == trip.id  # при слиянии trip_id остаётся от первой правки
+    # правки записаны все: сливается только задание пересчёта
+    actions = [row.action for row in await audit_rows(db_session, event.id)]
+    assert actions == ["trip_updated"] * 3
+
+
+async def test_patch_after_failed_job_enqueues_a_new_one(
+    api_client: AsyncClient, db_session: AsyncSession, event: Event
+) -> None:
+    trip = await make_trip(db_session, event_id=event.id)
+    await make_job(db_session, event_id=event.id, status=JobStatus.FAILED, attempts=8)
+
+    await patch_trip(api_client, trip.id, {"estimated_arrival": "2026-11-12T09:15:00"})
+
+    statuses = sorted(job.status for job in await jobs_of(db_session, event.id))
+    assert statuses == [JobStatus.FAILED, JobStatus.PENDING]
 
 
 # ---------------------------------------------------------------- отказ откатывает всё
@@ -275,16 +300,16 @@ async def application_of(client: AsyncClient, event: Event, telegram_id: int) ->
     return result
 
 
-async def test_second_delivery_of_the_same_edit_changes_nothing(
+async def test_job_after_a_processed_one_changes_nothing(
     api_client: AsyncClient, db_session: AsyncSession, event: Event
 ) -> None:
     trip = await make_trip(db_session, event_id=event.id)
-    await patch_trip(api_client, trip.id, {"estimated_arrival": "2026-11-12T09:15:00"})
-    await patch_trip(api_client, trip.id, {"estimated_arrival": "2026-11-12T09:30:00"})
     factory = shared_session_factory(db_session)
-
+    await patch_trip(api_client, trip.id, {"estimated_arrival": "2026-11-12T09:15:00"})
     assert await process_next(factory) == JobOutcome.DONE
+    await patch_trip(api_client, trip.id, {"estimated_arrival": "2026-11-12T09:30:00"})
     rows_before = len(list((await db_session.scalars(select(AuditLog.id))).all()))
+
     assert await process_next(factory) == JobOutcome.DONE
 
     assert await process_next(factory) is None

@@ -3,12 +3,18 @@
 Телефоны, имена, username, telegram_id, initData и invite-коды в лог не попадают: форматтер
 берёт из `extra` лишь перечисленные ниже ключи, а `request_id` и `job_id` — из контекста.
 Текст сообщения отвечает вызывающий код: персональных данных в нём быть не должно.
+
+Исключения пишутся без текста: `exc_type` — имя класса, `traceback` — только кадры стека и имена
+классов звеньев цепочки. Сообщение исключения (`str(exc)`) не попадает в лог: в текстах ошибок
+Postgres бывают значения строк (`DETAIL: Key (...)=(...)`), а значит, и телефон.
 """
 
 import json
 import logging
 import sys
 from datetime import UTC, datetime
+from traceback import TracebackException
+from types import TracebackType
 from typing import Any
 
 from app.observability import context
@@ -21,6 +27,47 @@ EXTRA_FIELDS = ("method", "route", "status", "duration_ms", "kind", "outcome", "
 # Уровень «sqlalchemy» не трогаем: библиотека держит его на WARNING, и SQL с результатами
 # запросов в лог не попадает, даже если root стоит на DEBUG.
 LIBRARY_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access", "sqlalchemy", "aiogram")
+
+
+_CAUSE_JOINT = "\nThe above exception was the direct cause of the following exception:\n\n"
+_CONTEXT_JOINT = "\nDuring handling of the above exception, another exception occurred:\n\n"
+
+
+def _exception_chain(exception: TracebackException) -> list[tuple[str, TracebackException]]:
+    """Звенья цепочки от первопричины к последнему исключению: (связка перед звеном, звено)."""
+    links: list[tuple[str, TracebackException]] = []
+    current = exception
+    while True:
+        if current.__cause__ is not None:
+            older, joint = current.__cause__, _CAUSE_JOINT
+        elif current.__context__ is not None and not current.__suppress_context__:
+            older, joint = current.__context__, _CONTEXT_JOINT
+        else:
+            links.append(("", current))
+            break
+        links.append((joint, current))
+        current = older
+    links.reverse()
+    return links
+
+
+def frames_only(
+    exc_type: type[BaseException], exc_value: BaseException, exc_traceback: TracebackType | None
+) -> str:
+    """Traceback без текста исключений: кадры стека и имя класса каждого звена цепочки.
+
+    Обычный `format_exception` дописывает к имени класса `str(exc)`, а ошибки БД и библиотек
+    кладут туда значения полей. Кадры (файл, строка, функция, строка кода) данных не содержат.
+    """
+    parts: list[str] = []
+    for joint, link in _exception_chain(TracebackException(exc_type, exc_value, exc_traceback)):
+        name = getattr(link, "exc_type_str", None) or (
+            link.exc_type.__qualname__ if link.exc_type is not None else "BaseException"
+        )
+        parts.append(
+            f"{joint}Traceback (most recent call last):\n{''.join(link.stack.format())}{name}\n"
+        )
+    return "".join(parts)
 
 
 class JsonFormatter(logging.Formatter):
@@ -44,9 +91,9 @@ class JsonFormatter(logging.Formatter):
         for key in EXTRA_FIELDS:
             if key in record.__dict__:
                 payload[key] = record.__dict__[key]
-        if record.exc_info and record.exc_info[0] is not None:
+        if record.exc_info and record.exc_info[0] is not None and record.exc_info[1] is not None:
             payload["exc_type"] = record.exc_info[0].__name__
-            payload["traceback"] = self.formatException(record.exc_info)
+            payload["traceback"] = frames_only(*record.exc_info)
         # default=str: значение из белого списка нестандартного типа не должно ронять запись
         return json.dumps(payload, ensure_ascii=False, default=str)
 

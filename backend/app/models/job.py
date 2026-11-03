@@ -15,6 +15,7 @@ class BackgroundJob(Base):
     с CASCADE уводит задания вместе с группой. Воркер забирает `pending` с `run_after <= now()`;
     при ошибке растёт `attempts`, `run_after` сдвигается, а после лимита попыток задание
     получает `failed` и ждёт ручного решения. В `last_error` только имя класса исключения.
+    Ожидающее задание вида на группу может быть только одно (уникальный частичный индекс).
     """
 
     __tablename__ = "background_jobs"
@@ -25,6 +26,14 @@ class BackgroundJob(Base):
             postgresql_where=text("status = 'pending'"),
         ),
         Index("ix_background_jobs_event_id", "event_id"),
+        # одно ожидающее задание каждого вида на группу; failed и выполняемые правок не блокируют
+        Index(
+            "uq_background_jobs_event_kind_pending",
+            "event_id",
+            "kind",
+            unique=True,
+            postgresql_where=text("status = 'pending'"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)

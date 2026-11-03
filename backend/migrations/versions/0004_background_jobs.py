@@ -1,7 +1,9 @@
 """background jobs
 
 Очередь фоновых заданий в той же БД: задание создаётся в транзакции правки и забирается воркером
-через `FOR UPDATE SKIP LOCKED`. Частичный индекс покрывает выборку готовых заданий.
+через `FOR UPDATE SKIP LOCKED`. Частичный индекс покрывает выборку готовых заданий, частичный
+уникальный индекс оставляет по одному ожидающему заданию на группу и вид. Для действующих групп
+(`ends_on >= current_date`) сразу ставится задание пересчёта.
 
 Revision ID: 0004
 Revises: 0003
@@ -18,6 +20,14 @@ revision: str = "0004"
 down_revision: str | None = "0003"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
+
+
+_INITIAL_RECONCILE = """
+INSERT INTO background_jobs (id, event_id, kind, trip_id)
+SELECT gen_random_uuid(), e.id, 'reconcile_trip', NULL
+  FROM events e
+ WHERE e.ends_on >= current_date
+"""
 
 
 def upgrade() -> None:
@@ -77,9 +87,22 @@ def upgrade() -> None:
         postgresql_where=sa.text("status = 'pending'"),
     )
     op.create_index("ix_background_jobs_event_id", "background_jobs", ["event_id"], unique=False)
+    # одно ожидающее задание каждого вида на группу: лишние правки сливаются в него
+    op.create_index(
+        "uq_background_jobs_event_kind_pending",
+        "background_jobs",
+        ["event_id", "kind"],
+        unique=True,
+        postgresql_where=sa.text("status = 'pending'"),
+    )
+    # первый пересчёт для действующих групп: до воркера трансферы никто не дополнял и не
+    # пересчитывал после правок рейсов. Прошедшие группы и их историю не трогаем
+    op.execute(_INITIAL_RECONCILE)
 
 
 def downgrade() -> None:
+    # IF EXISTS: базы, где 0004 накатили до появления этого индекса, откатываются без ошибки
+    op.execute("DROP INDEX IF EXISTS uq_background_jobs_event_kind_pending")
     op.drop_index("ix_background_jobs_event_id", table_name="background_jobs")
     op.drop_index(
         "ix_background_jobs_pending_run_after",
