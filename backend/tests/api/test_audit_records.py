@@ -13,7 +13,7 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AuditLog, Event, TripSource, User
-from app.observability import context
+from tests.api.conftest import auth_headers
 from tests.api.test_applications import (
     act,
     apply,
@@ -566,18 +566,20 @@ async def test_failed_patch_trip_writes_nothing(
 # ---------------------------------------------------------------- общее
 
 
-async def test_records_take_request_id_from_context(
+async def test_records_take_request_id_from_request_header(
     api_client: AsyncClient, db_session: AsyncSession, event: Event
 ) -> None:
+    # request_id в контекст кладёт middleware запроса, сценарий берёт его оттуда
     trip_id = await trip_at(db_session, event)
-    token = context.request_id.set("req-abc")
-    try:
-        await put_app(api_client, db_session, event, body(trip_id))
-    finally:
-        context.request_id.reset(token)
+    headers = {**auth_headers(), "X-Request-ID": "req-abc-123"}
 
+    response = await api_client.put(
+        f"/events/{event.id}/my-application", json=body(trip_id), headers=headers
+    )
+
+    assert response.headers["X-Request-ID"] == "req-abc-123"
     (row,) = await rows(db_session, event)
-    assert (row.request_id, row.job_id) == ("req-abc", None)
+    assert (row.request_id, row.job_id) == ("req-abc-123", None)
 
 
 async def test_records_have_no_personal_data(
