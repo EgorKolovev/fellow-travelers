@@ -21,6 +21,7 @@ from app.services.access import is_member
 from app.services.audit import Actor, record
 from app.services.matching import (
     all_departed,
+    fill_event,
     leave_transfer,
     lock_event,
     mark_transfer_departed,
@@ -229,6 +230,7 @@ async def go_solo(session: AsyncSession, event: Event, user: User) -> Applicatio
             actor=_participant(user),
             reason=AuditReason.GO_SOLO,
         )
+        await fill_event(session, event.id)
     elif application.status != ApplicationStatus.SOLO:
         _change_status(
             session,
@@ -270,6 +272,7 @@ async def cancel_my_application(session: AsyncSession, event: Event, user: User)
             actor=_participant(user),
             reason=AuditReason.CANCEL,
         )
+        await fill_event(session, event.id)
     elif application.status != ApplicationStatus.CANCELLED:
         _change_status(
             session,

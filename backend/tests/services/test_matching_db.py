@@ -15,7 +15,14 @@ from app.models import (
     TransferStatus,
 )
 from app.services.audit import Actor
-from app.services.matching import event_lock_key, leave_transfer, lock_event, match_application
+from app.services.matching import (
+    FillResult,
+    event_lock_key,
+    fill_event,
+    leave_transfer,
+    lock_event,
+    match_application,
+)
 from tests.factories import make_application, make_event, make_transfer, make_trip
 
 BASE = datetime(2026, 11, 12, 5, 5, tzinfo=UTC)
@@ -115,6 +122,31 @@ async def test_leave_pair_removes_transfer_and_frees_remaining(db_session: Async
     assert count == 0
 
 
+async def test_leave_pair_does_not_rematch_remaining_by_itself(
+    db_session: AsyncSession,
+) -> None:
+    event = await make_event(db_session)
+    leaving = await _app(db_session, event.id)
+    staying = await _app(db_session, event.id, 5)
+    transfer = await match_application(db_session, staying)
+    assert transfer is not None
+    free = await _app(db_session, event.id, 6)
+    await db_session.refresh(leaving)
+
+    await leave_transfer(
+        db_session,
+        leaving,
+        new_status=ApplicationStatus.CANCELLED,
+        actor=PARTICIPANT,
+        reason=AuditReason.CANCEL,
+    )
+
+    # новое размещение ищет сценарий через fill_event, а не расформирование
+    assert staying.status == free.status == ApplicationStatus.SEARCHING
+    assert staying.transfer_id is None
+    assert free.transfer_id is None
+
+
 async def test_leave_when_remaining_all_departed_marks_transfer_departed(
     db_session: AsyncSession,
 ) -> None:
@@ -175,3 +207,72 @@ async def test_leave_pair_with_departed_remaining_makes_it_solo(db_session: Asyn
     assert departed.transfer_id is None
     count = await db_session.scalar(select(func.count()).select_from(Transfer))
     assert count == 0
+
+
+async def test_fill_event_joins_open_transfer_and_assembles_new_group(
+    db_session: AsyncSession,
+) -> None:
+    event = await make_event(db_session)
+    await _app(db_session, event.id)
+    second = await _app(db_session, event.id, 5)
+    pair = await match_application(db_session, second)
+    assert pair is not None
+    joiner = await _app(db_session, event.id, 6)
+    early = await _app(db_session, event.id, 100)
+    late = await _app(db_session, event.id, 105)
+    alone = await _app(db_session, event.id, 1000)
+
+    result = await fill_event(db_session, event.id)
+
+    assert result == FillResult(joined=1, created=1)
+    assert (joiner.status, joiner.transfer_id) == (ApplicationStatus.ASSIGNED, pair.id)
+    assert early.status == late.status == ApplicationStatus.ASSIGNED
+    assert early.transfer_id == late.transfer_id not in (None, pair.id)
+    assert (alone.status, alone.transfer_id) == (ApplicationStatus.SEARCHING, None)
+
+
+async def test_fill_event_is_idempotent(db_session: AsyncSession) -> None:
+    event = await make_event(db_session)
+    await _app(db_session, event.id)
+    second = await _app(db_session, event.id, 5)
+    assert await match_application(db_session, second) is not None
+    await _app(db_session, event.id, 6)
+    await _app(db_session, event.id, 100)
+    await _app(db_session, event.id, 105)
+    await _app(db_session, event.id, 1000)
+    assert await fill_event(db_session, event.id) == FillResult(joined=1, created=1)
+
+    async def snapshot() -> list[tuple[uuid.UUID, ApplicationStatus, uuid.UUID | None]]:
+        rows = await db_session.execute(
+            select(Application.id, Application.status, Application.transfer_id)
+            .where(Application.event_id == event.id)
+            .order_by(Application.id)
+            .execution_options(populate_existing=True)
+        )
+        return [(row.id, row.status, row.transfer_id) for row in rows]
+
+    before = (await snapshot(), await db_session.scalar(select(func.count()).select_from(AuditLog)))
+
+    assert await fill_event(db_session, event.id) == FillResult(joined=0, created=0)
+
+    after = (await snapshot(), await db_session.scalar(select(func.count()).select_from(AuditLog)))
+    assert after == before
+
+
+async def test_fill_event_ignores_unfit_statuses_and_other_events(
+    db_session: AsyncSession,
+) -> None:
+    event = await make_event(db_session)
+    await _app(db_session, event.id, status=ApplicationStatus.SOLO)
+    await _app(db_session, event.id, status=ApplicationStatus.CANCELLED)
+    await _app(db_session, event.id, departed_at=BASE)
+    await _app(db_session, event.id)  # единственная ждущая
+    other = await make_event(db_session)
+    other_first = await _app(db_session, other.id)
+    other_second = await _app(db_session, other.id, 5)
+
+    assert await fill_event(db_session, event.id) == FillResult(joined=0, created=0)
+
+    assert other_first.status == other_second.status == ApplicationStatus.SEARCHING
+    assert await db_session.scalar(select(func.count()).select_from(AuditLog)) == 0
+    assert await db_session.scalar(select(func.count()).select_from(Transfer)) == 0

@@ -1,10 +1,13 @@
 import uuid
+from collections import defaultdict
+from dataclasses import dataclass
 from datetime import timedelta
 
-from sqlalchemy import BigInteger, bindparam, delete, func, select, text, update
+from sqlalchemy import BigInteger, bindparam, delete, exists, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
-from app.matching import MatchCandidate, find_group
+from app.matching import JoinTransfer, MatchCandidate, OpenTransfer, find_placement
 from app.models import (
     Application,
     ApplicationStatus,
@@ -51,10 +54,76 @@ def _candidate(application: Application, trip: Trip) -> MatchCandidate:
     )
 
 
-async def match_application(session: AsyncSession, application: Application) -> Transfer | None:
-    """Первоначальный подбор среди неназначенных заявок группы; только flush, без commit.
+@dataclass(frozen=True, slots=True)
+class FillResult:
+    """Итог `fill_event`: сколько заявок сели в существующие трансферы и сколько собрали новые."""
 
-    Вызывать под `lock_event`. Существующие трансферы не дополняются (pre-MVP).
+    joined: int
+    created: int
+
+
+async def _open_transfers(
+    session: AsyncSession, event_id: uuid.UUID
+) -> tuple[dict[uuid.UUID, Transfer], list[OpenTransfer]]:
+    """Трансферы группы, которые можно дополнить: active, origin=auto, никто не уехал.
+
+    Состав берётся свежим из БД вместе с рейсами. Трансфер меньше чем из двух заявок
+    (по инвариантам такого нет) не дополняем: `OpenTransfer` обещает минимум две.
+    """
+    departed_member = aliased(Application)
+    transfers = list(
+        (
+            await session.scalars(
+                select(Transfer)
+                .where(
+                    Transfer.event_id == event_id,
+                    Transfer.status == TransferStatus.ACTIVE,
+                    Transfer.origin == TransferOrigin.AUTO,
+                    ~exists().where(
+                        departed_member.transfer_id == Transfer.id,
+                        departed_member.departed_at.is_not(None),
+                    ),
+                )
+                .execution_options(populate_existing=True)
+            )
+        ).all()
+    )
+    if not transfers:
+        return {}, []
+    rows = (
+        await session.execute(
+            select(Application, Trip)
+            .join(Trip, Trip.id == Application.trip_id)
+            .where(Application.transfer_id.in_([transfer.id for transfer in transfers]))
+            .execution_options(populate_existing=True)
+        )
+    ).all()
+    members: defaultdict[uuid.UUID | None, list[MatchCandidate]] = defaultdict(list)
+    for app, trip in rows:
+        members[app.transfer_id].append(_candidate(app, trip))
+    open_transfers = [
+        OpenTransfer(transfer.id, tuple(members[transfer.id]))
+        for transfer in transfers
+        if len(members[transfer.id]) >= 2
+    ]
+    return {transfer.id: transfer for transfer in transfers}, open_transfers
+
+
+async def match_application(
+    session: AsyncSession,
+    application: Application,
+    *,
+    reason: AuditReason = AuditReason.AUTO_MATCH,
+) -> Transfer | None:
+    """Размещает заявку в `searching`: в открытый трансфер или в новую группу; только flush.
+
+    Вызывать под `lock_event`. Решение принимает `matching.find_placement`: открытые трансферы
+    группы (active, origin=auto, никто не уехал) и свободные заявки (searching, без отъезда и
+    трансфера) читаются свежими из БД. Возвращает трансфер, в который села заявка, либо None, если
+    она осталась в `searching` (или не подходит для подбора).
+
+    Посадка в открытый трансфер пишет `transfer_joined`, новая группа — `transfer_created`;
+    оба от системы с причиной `reason`.
     """
     if (
         application.status != ApplicationStatus.SEARCHING
@@ -68,6 +137,7 @@ async def match_application(session: AsyncSession, application: Application) -> 
             execution_options={"populate_existing": True},
         )
     ).scalar_one()
+    transfers, open_transfers = await _open_transfers(session, application.event_id)
     rows = (
         await session.execute(
             select(Application, Trip)
@@ -83,15 +153,33 @@ async def match_application(session: AsyncSession, application: Application) -> 
         )
     ).all()
     by_id = {app.id: app for app, _ in rows}
-    group = find_group(
-        _candidate(application, own_trip), (_candidate(app, trip) for app, trip in rows)
+    decision = find_placement(
+        _candidate(application, own_trip),
+        open_transfers,
+        (_candidate(app, trip) for app, trip in rows),
     )
-    if group is None:
+    if decision is None:
         return None
+    if isinstance(decision, JoinTransfer):
+        transfer = transfers[decision.transfer_id]
+        # status и transfer_id меняются вместе: один UPDATE, CHECK assigned_has_transfer цел
+        application.status = ApplicationStatus.ASSIGNED
+        application.transfer_id = transfer.id
+        await session.flush()
+        record(
+            session,
+            event_id=application.event_id,
+            action=AuditAction.TRANSFER_JOINED,
+            actor=SYSTEM,
+            reason=reason,
+            application=application,
+            transfer_id=transfer.id,
+        )
+        return transfer
     transfer = Transfer(event_id=application.event_id, origin=TransferOrigin.AUTO)
     session.add(transfer)
     await session.flush()
-    for member in group:
+    for member in decision.members:
         target = application if member.id == application.id else by_id[member.id]
         # status и transfer_id меняются вместе: один UPDATE, CHECK assigned_has_transfer цел
         target.status = ApplicationStatus.ASSIGNED
@@ -102,11 +190,52 @@ async def match_application(session: AsyncSession, application: Application) -> 
         event_id=application.event_id,
         action=AuditAction.TRANSFER_CREATED,
         actor=SYSTEM,
-        reason=AuditReason.AUTO_MATCH,
+        reason=reason,
         transfer_id=transfer.id,
-        details={"application_ids": [str(member.id) for member in group]},
+        details={"application_ids": [str(member.id) for member in decision.members]},
     )
     return transfer
+
+
+async def fill_event(session: AsyncSession, event_id: uuid.UUID) -> FillResult:
+    """Размещает ждущие заявки группы; только flush, без commit. Вызывать под `lock_event`.
+
+    Обходит заявки в `searching` без отъезда и трансфера по порядку подачи `(created_at, id)` и
+    ведёт каждую через `match_application` с причиной `auto_fill`. Заявка перед проходом читается
+    заново: её могла уже посадить предыдущая (в новую группу или в трансфер). Совместимость
+    замкнута по подмножествам, поэтому одного прохода хватает: повторный вызов ничего не меняет
+    и ничего не пишет в историю.
+    """
+    waiting = (
+        await session.scalars(
+            select(Application.id)
+            .where(
+                Application.event_id == event_id,
+                Application.status == ApplicationStatus.SEARCHING,
+                Application.departed_at.is_(None),
+                Application.transfer_id.is_(None),
+            )
+            .order_by(Application.created_at, Application.id)
+        )
+    ).all()
+    # трансфер, которого не было до прохода, считается созданным, остальные — дополненными
+    known = set(
+        (await session.scalars(select(Transfer.id).where(Transfer.event_id == event_id))).all()
+    )
+    joined = created = 0
+    for application_id in waiting:
+        application = await session.get(Application, application_id, populate_existing=True)
+        if application is None:
+            continue
+        transfer = await match_application(session, application, reason=AuditReason.AUTO_FILL)
+        if transfer is None:
+            continue
+        if transfer.id in known:
+            joined += 1
+        else:
+            created += 1
+            known.add(transfer.id)
+    return FillResult(joined=joined, created=created)
 
 
 async def leave_transfer(
@@ -120,14 +249,13 @@ async def leave_transfer(
     """Снимает заявку с трансфера и выставляет ей `new_status` (solo/cancelled); только flush.
 
     Если в трансфере осталось меньше двух заявок, он расформировывается: оставшаяся заявка
-    возвращается в `searching` и проходит первоначальный подбор (если она уже уехала, становится
-    `solo` и не подбирается). Иначе состав остаётся как есть
-    (замену в pre-MVP не ищем).
+    возвращается в `searching` (если она уже уехала, становится `solo` и не подбирается).
+    Иначе состав остаётся как есть. Замену и новое место для оставшихся ищет не эта функция,
+    а вызывающий сценарий: `fill_event` после выхода.
 
     В историю пишутся `transfer_left` уходящей заявки с переданными `actor` и `reason`; при
     расформировании — `transfer_left` каждой оставшейся (причина `member_left`, тот же `actor`)
     и одна `transfer_dissolved`; если оставшиеся все уехали — `transfer_departed`.
-    Последующий подбор оставшихся пишет `transfer_created` от системы.
 
     Порядок важен из-за CHECK `assigned_has_transfer` и FK без отложенной проверки: уходящая заявка
     меняет transfer_id и status одним UPDATE и флашится первой; трансфер удаляется только после
@@ -198,9 +326,6 @@ async def leave_transfer(
         transfer_id=transfer_id,
         details={"application_ids": [str(app.id) for app in remaining]},
     )
-    for app in remaining:
-        if app.departed_at is None:
-            await match_application(session, app)
 
 
 async def mark_transfer_departed(

@@ -302,12 +302,12 @@ async def test_leave_pair_writes_leave_remaining_and_dissolution(
     await assert_history_matches_transfers(db_session, event.id)
 
 
-async def test_leave_pair_with_free_third_writes_new_transfer_from_system(
+async def test_leave_pair_with_waiting_third_writes_new_transfer_with_auto_fill(
     api_client: AsyncClient, db_session: AsyncSession, event: Event, p2: User, p3: User
 ) -> None:
     await apply(api_client, db_session, event, 42)
-    await apply(api_client, db_session, event, 101)
-    await apply(api_client, db_session, event, 102)  # свободная, ждёт
+    await apply(api_client, db_session, event, 101, minutes=10)
+    await apply(api_client, db_session, event, 102, minutes=20)  # к паре 42 + 101 не подходит
 
     await act(api_client, db_session, event, "cancel")
 
@@ -319,9 +319,61 @@ async def test_leave_pair_with_free_third_writes_new_transfer_from_system(
         "transfer_created",
     ]
     rematch = tail[-1]
-    assert brief(rematch) == ("transfer_created", "auto_match", "system", None, None)
+    assert brief(rematch) == ("transfer_created", "auto_fill", "system", None, None)
     assert rematch.transfer_id != tail[0].transfer_id
     assert len(rematch.details["application_ids"]) == 2
+    await assert_history_matches_transfers(db_session, event.id)
+
+
+async def test_put_that_joins_writes_transfer_joined_from_system(
+    api_client: AsyncClient, db_session: AsyncSession, event: Event, user: User, p2: User, p3: User
+) -> None:
+    await apply(api_client, db_session, event, 101)
+    pair = await apply(api_client, db_session, event, 102)
+    third = await apply(api_client, db_session, event, 42)
+
+    submitted, joined = (await rows(db_session, event))[-2:]
+    assert brief(submitted)[:4] == ("application_submitted", None, "participant", user.id)
+    assert brief(joined) == ("transfer_joined", "auto_match", "system", None, user.id)
+    assert joined.application_id == uuid.UUID(third.json()["id"])
+    assert joined.transfer_id == uuid.UUID(pair.json()["transfer_id"])
+    assert joined.details == {}
+    await assert_history_matches_transfers(db_session, event.id)
+
+
+async def test_resume_search_that_joins_writes_status_then_transfer_joined(
+    api_client: AsyncClient, db_session: AsyncSession, event: Event, p2: User, p3: User
+) -> None:
+    await apply(api_client, db_session, event, 101)
+    await apply(api_client, db_session, event, 102)
+    await apply(api_client, db_session, event, 42, seek_companions=False)
+
+    await act(api_client, db_session, event, "resume-search")
+
+    actions = [(row.action, row.reason, row.actor_kind) for row in await rows(db_session, event)]
+    assert actions[-2:] == [
+        ("status_changed", "resume_search", "participant"),
+        ("transfer_joined", "auto_match", "system"),
+    ]
+    await assert_history_matches_transfers(db_session, event.id)
+
+
+async def test_leave_triple_with_waiting_fourth_writes_leave_then_auto_fill_join(
+    api_client: AsyncClient, db_session: AsyncSession, event: Event, user: User, p2: User, p3: User
+) -> None:
+    p4 = await join(db_session, event, 103)
+    await apply(api_client, db_session, event, 42)
+    await apply(api_client, db_session, event, 101)
+    triple = await apply(api_client, db_session, event, 102)
+    fourth = await apply(api_client, db_session, event, p4.telegram_id)
+
+    await act(api_client, db_session, event, "go-solo")
+
+    left, joined = (await rows(db_session, event))[-2:]
+    assert brief(left) == ("transfer_left", "go_solo", "participant", user.id, user.id)
+    assert brief(joined) == ("transfer_joined", "auto_fill", "system", None, p4.id)
+    assert joined.application_id == uuid.UUID(fourth.json()["id"])
+    assert left.transfer_id == joined.transfer_id == uuid.UUID(triple.json()["transfer_id"])
     await assert_history_matches_transfers(db_session, event.id)
 
 
@@ -593,6 +645,7 @@ async def test_records_have_no_personal_data(
     await act(api_client, db_session, event, "go-solo", 42)
     await act(api_client, db_session, event, "resume-search", 42)
     await act(api_client, db_session, event, "cancel", 101)
+    await act(api_client, db_session, event, "cancel", 42)
     await marks(api_client, db_session, event, {"departed": True}, 102)
 
     history = await rows(db_session, event)
@@ -602,6 +655,7 @@ async def test_records_have_no_personal_data(
         "status_changed",
         "marks_changed",
         "transfer_created",
+        "transfer_joined",
         "transfer_left",
         "transfer_dissolved",
     }
