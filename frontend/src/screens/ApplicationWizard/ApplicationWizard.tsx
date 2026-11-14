@@ -3,6 +3,7 @@ import { useLocation, useParams, useSearchParams } from 'react-router';
 import { isApiErrorCode } from '../../api/errors';
 import { useMyApplication, useUpsertApplication } from '../../api/hooks';
 import type { Application, Trip } from '../../api/types';
+import { SHARE_CONTACT_IN_BOT_TEXT } from '../../lib/botText';
 import { useBackNavigation } from '../../lib/useBack';
 import { useBackButton } from '../../lib/useBackButton';
 import { Screen } from '../../ui/Screen/Screen';
@@ -156,7 +157,7 @@ export function ApplicationWizard() {
       onSuccess: leave,
       onError: (error) => {
         if (isApiErrorCode(error, 'PHONE_REQUIRED')) {
-          update({ stack: [...stack, { name: 'profile' }], notice: error.message });
+          update({ stack: [...stack, { name: 'profile' }], notice: SHARE_CONTACT_IN_BOT_TEXT });
         } else if (isApiErrorCode(error, 'VALIDATION_ERROR') && error.fields?.trip_id) {
           update({ stack: [...stack, { name: 'cities' }], notice: TRIP_UNAVAILABLE });
         } else if (

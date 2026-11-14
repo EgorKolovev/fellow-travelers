@@ -2,7 +2,6 @@ import {
   init,
   miniApp,
   openTelegramLink,
-  requestContact,
   retrieveLaunchParams,
   retrieveRawInitData,
   viewport,
@@ -69,23 +68,6 @@ export function getInitDataPhotoUrl(): string | undefined {
     return retrieveLaunchParams().tgWebAppData?.user?.photo_url || undefined;
   } catch {
     return undefined;
-  }
-}
-
-export function canRequestContact(): boolean {
-  try {
-    return requestContact.isAvailable();
-  } catch {
-    return false;
-  }
-}
-
-/** Просит контакт; ошибка (в т.ч. отказ пользователя) не пробрасывается. */
-export async function askForContact(): Promise<void> {
-  try {
-    await requestContact();
-  } catch {
-    // пользователь закрыл попап или отказал — всё равно перезапросим /me
   }
 }
 

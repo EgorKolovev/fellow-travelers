@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
+import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, NoInitDataError } from '../../api/errors';
 import type { Me } from '../../api/me';
@@ -9,11 +10,12 @@ import { Profile } from './Profile';
 const fetchMe = vi.hoisted(() => vi.fn());
 
 vi.mock('../../api/me', () => ({ fetchMe, meQueryKey: ['me'] }));
+const openBot = vi.hoisted(() => vi.fn());
+
 vi.mock('../../lib/telegram', () => ({
   getInitDataPhotoUrl: () => undefined,
-  canRequestContact: () => true,
-  askForContact: vi.fn(),
-  openBot: vi.fn(),
+  getStartParamRaw: () => 'join_ABC123',
+  openBot,
 }));
 
 const baseMe: Me = {
@@ -41,6 +43,7 @@ function renderProfile() {
 describe('Profile', () => {
   beforeEach(() => {
     fetchMe.mockReset();
+    openBot.mockReset();
   });
 
   it('с телефоном: значения видны, «Далее» активна', async () => {
@@ -51,11 +54,11 @@ describe('Profile', () => {
     expect(screen.getByLabelText('Телеграм')).toHaveValue('@ivan_petrov');
     expect(screen.getByLabelText('Номер телефона')).toHaveValue('+7 912 204 29 12');
     expect(screen.getByRole('button', { name: /Далее/ })).toBeEnabled();
-    expect(screen.queryByRole('button', { name: 'Поделиться номером' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Перейти в бота' })).not.toBeInTheDocument();
     expect(screen.getByText('Шаг 1 из 5')).toBeInTheDocument();
   });
 
-  it('без телефона: «Далее» disabled, есть «Поделиться номером» и пояснение', async () => {
+  it('без телефона: «Далее» disabled, есть пояснение про бота и «Перейти в бота»', async () => {
     fetchMe.mockResolvedValue({ ...baseMe, phone: null, has_phone: false, username: null });
     renderProfile();
 
@@ -63,8 +66,10 @@ describe('Profile', () => {
     expect(screen.getByLabelText('Номер телефона')).toHaveValue('');
     expect(screen.getByLabelText('Телеграм')).toHaveValue('нет');
     expect(screen.getByRole('button', { name: /Далее/ })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Поделиться номером' })).toBeEnabled();
-    expect(screen.getByText(/Телефон нужен, чтобы попутчики/)).toBeInTheDocument();
+    expect(screen.getByText(/поделитесь контактом в чате с ботом/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Поделиться номером' })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Перейти в бота' }));
+    expect(openBot).toHaveBeenCalledWith('join_ABC123');
   });
 
   it('401 → «Откройте приложение из Telegram»', async () => {

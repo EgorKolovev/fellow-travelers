@@ -14,7 +14,6 @@ import { Home } from './screens/Home/Home';
 import { Invite } from './screens/Invite/Invite';
 import { Join } from './screens/Join/Join';
 import { MyTrip } from './screens/MyTrip/MyTrip';
-import { PhoneGate } from './screens/PhoneGate/PhoneGate';
 import { Profile } from './screens/Profile/Profile';
 import { TransferDetails } from './screens/TransferDetails/TransferDetails';
 import { TripForm } from './screens/TripForm/TripForm';
@@ -58,10 +57,8 @@ export function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <StartParamContext.Provider value={startParam}>
-        {/* Телефон — до любого экрана (CAP-01); роутер с первым экраном по start_param — за гейтом. */}
-        <PhoneGate>
-          <RouterProvider router={router} />
-        </PhoneGate>
+        {/* Телефон запрашивает бот после /start; на вступление без него бэкенд отвечает PHONE_REQUIRED. */}
+        <RouterProvider router={router} />
       </StartParamContext.Provider>
     </QueryClientProvider>
   );

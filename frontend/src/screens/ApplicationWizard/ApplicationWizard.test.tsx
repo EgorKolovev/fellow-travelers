@@ -517,7 +517,7 @@ describe('ApplicationWizard', () => {
     it('PHONE_REQUIRED → шаг 1 с сообщением, «Далее» — обратно в сводку', async () => {
       await submitWith(new ApiError(403, 'PHONE_REQUIRED', 'Нужен номер телефона'));
       expect(await heading('Ваши данные')).toBeInTheDocument();
-      expect(screen.getByRole('alert')).toHaveTextContent('Нужен номер телефона');
+      expect(screen.getByRole('alert')).toHaveTextContent(/поделитесь контактом в чате с ботом/);
       await profileNext();
       expect(await heading('Всё верно?')).toBeInTheDocument();
     });
