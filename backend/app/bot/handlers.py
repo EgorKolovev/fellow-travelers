@@ -1,12 +1,22 @@
+import logging
 import re
+from contextlib import suppress
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message, ReplyKeyboardRemove
+from aiogram.types import (
+    MenuButtonDefault,
+    MenuButtonWebApp,
+    Message,
+    ReplyKeyboardRemove,
+    WebAppInfo,
+)
 from aiogram.types import User as TgUser
 
 from app.bot import keyboards, texts
+from app.config import get_settings
 from app.db import get_session_factory
 from app.services.users import InvalidPhoneError, TelegramProfile, save_phone, upsert_profile
 
@@ -26,15 +36,37 @@ def _profile(tg: TgUser) -> TelegramProfile:
     )
 
 
-async def _answer_main(message: Message, state: FSMContext, *, has_phone: bool, intro: str) -> None:
-    """Просит телефон, если его нет, иначе показывает кнопки открытия приложения."""
+async def _answer_main(message: Message, state: FSMContext, *, has_phone: bool, text: str) -> None:
+    """Просит контакт, если телефона нет, иначе показывает inline-кнопки приложения."""
     if has_phone:
         join_code: str | None = (await state.get_data()).get(_JOIN_KEY)
-        await message.answer(intro, reply_markup=keyboards.app_keyboard(join_code))
+        await message.answer(text, reply_markup=keyboards.app_keyboard(join_code))
     else:
-        await message.answer(
-            f"{intro}\n\n{texts.PHONE_REQUEST}", reply_markup=keyboards.phone_keyboard()
+        await message.answer(texts.PHONE_REQUEST, reply_markup=keyboards.phone_keyboard())
+
+
+def _ready_text(join_code: str | None) -> str:
+    return texts.READY_NO_CODE if join_code is None else texts.READY_JOIN
+
+
+async def _set_app_menu(message: Message, *, enabled: bool) -> None:
+    """Включает или сбрасывает кнопку меню мини-приложения в этом чате; сбои игнорирует."""
+    if message.bot is None:
+        return
+    menu_button: MenuButtonDefault | MenuButtonWebApp
+    if enabled:
+        web_app_url = get_settings().web_app_url
+        if web_app_url is None:
+            return
+        menu_button = MenuButtonWebApp(
+            text=texts.OPEN_APP_BUTTON, web_app=WebAppInfo(url=web_app_url)
         )
+    else:
+        menu_button = MenuButtonDefault()
+    try:
+        await message.bot.set_chat_menu_button(chat_id=message.chat.id, menu_button=menu_button)
+    except TelegramAPIError:
+        logging.warning("Не удалось обновить кнопку меню", exc_info=True)
 
 
 @router.message(Command("start"))
@@ -48,7 +80,11 @@ async def on_start(message: Message, command: CommandObject, state: FSMContext) 
     await state.update_data({_JOIN_KEY: match.group(1) if match else None})
     async with get_session_factory()() as session:
         user = await upsert_profile(session, _profile(tg))
-    await _answer_main(message, state, has_phone=user.phone is not None, intro=texts.START)
+    join_code = match.group(1) if match else None
+    await _set_app_menu(message, enabled=user.phone is not None)
+    await _answer_main(
+        message, state, has_phone=user.phone is not None, text=_ready_text(join_code)
+    )
 
 
 @router.message(F.contact)
@@ -66,9 +102,14 @@ async def on_contact(message: Message, state: FSMContext) -> None:
     except InvalidPhoneError:
         await message.answer(texts.INVALID_PHONE, reply_markup=keyboards.phone_keyboard())
         return
-    # Reply-клавиатуру убираем отдельным сообщением: в одном сообщении возможна только одна разметка
-    await message.answer(texts.PHONE_SAVED, reply_markup=ReplyKeyboardRemove())
-    await _answer_main(message, state, has_phone=True, intro=texts.READY)
+    # Reply-клавиатуру убираем служебным сообщением (в одном сообщении возможна только одна
+    # разметка) и сразу его удаляем, чтобы в чате осталось одно сообщение «готово».
+    tmp = await message.answer(texts.REMOVE_KEYBOARD, reply_markup=ReplyKeyboardRemove())
+    with suppress(TelegramBadRequest):
+        await tmp.delete()
+    await _set_app_menu(message, enabled=True)
+    join_code: str | None = (await state.get_data()).get(_JOIN_KEY)
+    await _answer_main(message, state, has_phone=True, text=_ready_text(join_code))
 
 
 @router.message()
@@ -78,4 +119,5 @@ async def on_other(message: Message, state: FSMContext) -> None:
         return
     async with get_session_factory()() as session:
         user = await upsert_profile(session, _profile(tg))
-    await _answer_main(message, state, has_phone=user.phone is not None, intro=texts.HINT)
+    await _set_app_menu(message, enabled=user.phone is not None)
+    await _answer_main(message, state, has_phone=user.phone is not None, text=texts.HINT)

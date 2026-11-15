@@ -47,3 +47,38 @@ def test_log_level_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LOG_LEVEL", "DEBUG")
 
     assert make_settings(monkeypatch, "my_bot1").log_level == "DEBUG"
+
+
+def make_web_app_url(monkeypatch: pytest.MonkeyPatch, raw: str) -> str | None:
+    monkeypatch.setenv("BOT_USERNAME", "my_bot1")
+    monkeypatch.setenv("WEB_APP_URL", raw)
+    return Settings(_env_file=None).web_app_url
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("poputchiki.example.com", "https://poputchiki.example.com"),
+        ("https://poputchiki.example.com", "https://poputchiki.example.com"),
+        ("https://poputchiki.example.com/", "https://poputchiki.example.com"),
+        ("poputchiki.example.com/", "https://poputchiki.example.com"),
+        ("", None),
+        ("   ", None),
+    ],
+)
+def test_web_app_url_normalized(
+    monkeypatch: pytest.MonkeyPatch, raw: str, expected: str | None
+) -> None:
+    assert make_web_app_url(monkeypatch, raw) == expected
+
+
+def test_web_app_url_default_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BOT_USERNAME", "my_bot1")
+    monkeypatch.delenv("WEB_APP_URL", raising=False)
+    assert Settings(_env_file=None).web_app_url is None
+
+
+@pytest.mark.parametrize("raw", ["http://poputchiki.example.com", "ftp://x.example.com"])
+def test_web_app_url_requires_https(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
+    with pytest.raises(ValidationError, match="WEB_APP_URL"):
+        make_web_app_url(monkeypatch, raw)

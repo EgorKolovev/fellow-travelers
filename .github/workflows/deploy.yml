@@ -21,11 +21,69 @@ permissions:
   contents: read
 
 jobs:
-  ci:
+  tests:
     uses: ./.github/workflows/ci.yml
 
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      caddy: ${{ steps.filter.outputs.caddy }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - id: filter
+        name: Определить изменённые компоненты
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+        run: |
+          backend=false
+          frontend=false
+          caddy=false
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] || \
+             ! git diff --quiet "$BEFORE" "$SHA" -- .github/workflows/deploy.yml; then
+            backend=true
+            frontend=true
+            caddy=true
+          else
+            git diff --quiet "$BEFORE" "$SHA" -- 'backend/**' || backend=true
+            git diff --quiet "$BEFORE" "$SHA" -- 'frontend/**' || frontend=true
+            git diff --quiet "$BEFORE" "$SHA" -- 'deploy/caddy/**' || caddy=true
+          fi
+          {
+            echo "backend=$backend"
+            echo "frontend=$frontend"
+            echo "caddy=$caddy"
+          } >> "$GITHUB_OUTPUT"
+      - name: Вывести результат
+        if: always()
+        env:
+          BACKEND_CHANGED: ${{ steps.filter.outputs.backend }}
+          FRONTEND_CHANGED: ${{ steps.filter.outputs.frontend }}
+          CADDY_CHANGED: ${{ steps.filter.outputs.caddy }}
+        run: |
+          backend=Нет
+          frontend=Нет
+          caddy=Нет
+          if [ "$BACKEND_CHANGED" = "true" ]; then backend=Да; fi
+          if [ "$FRONTEND_CHANGED" = "true" ]; then frontend=Да; fi
+          if [ "$CADDY_CHANGED" = "true" ]; then caddy=Да; fi
+          {
+            echo '## Необходимость сборки'
+            echo
+            echo '| Компонент | Нужна сборка |'
+            echo '| --- | --- |'
+            echo "| api и bot | $backend |"
+            echo "| web | $frontend |"
+            echo "| caddy | $caddy |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   deploy:
-    needs: ci
+    needs: [tests, changes]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -56,6 +114,13 @@ jobs:
               exit 1 ;;
           esac
 
+      - name: Проверить Telegram relay
+        env:
+          TELEGRAM_RELAY_URL: ${{ secrets.TELEGRAM_RELAY_URL }}
+          TELEGRAM_RELAY_SECRET: ${{ secrets.TELEGRAM_RELAY_SECRET }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        run: python3 .github/scripts/check-telegram-relay.py
+
       - name: Проверить Caddyfile
         run: |
           docker run --rm -v "$PWD/deploy/caddy:/etc/caddy:ro" \
@@ -79,35 +144,48 @@ jobs:
           echo "IAM_TOKEN=$token" >> "$GITHUB_ENV"
           printf '%s' "$token" | docker login --username iam --password-stdin cr.yandex
 
-      - name: Образ бэкенда (api и bot)
+      - id: build_backend
+        name: Образ бэкенда (api и bot)
+        if: needs.changes.outputs.backend == 'true'
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: ./backend
           push: true
-          tags: cr.yandex/${{ secrets.YC_REGISTRY_ID }}/api:${{ github.sha }}
+          # latest нужен неизменным компонентам в спецификации как fallback на текущий образ.
+          tags: |
+            cr.yandex/${{ secrets.YC_REGISTRY_ID }}/api:${{ github.sha }}
+            cr.yandex/${{ secrets.YC_REGISTRY_ID }}/api:latest
           provenance: false
           sbom: false
           cache-from: type=gha,scope=api
           cache-to: type=gha,mode=max,scope=api
 
-      - name: Образ мини-приложения
+      - id: build_web
+        name: Образ мини-приложения
+        if: needs.changes.outputs.frontend == 'true'
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: ./frontend
           build-args: VITE_BOT_USERNAME=${{ secrets.BOT_USERNAME }}
           push: true
-          tags: cr.yandex/${{ secrets.YC_REGISTRY_ID }}/web:${{ github.sha }}
+          tags: |
+            cr.yandex/${{ secrets.YC_REGISTRY_ID }}/web:${{ github.sha }}
+            cr.yandex/${{ secrets.YC_REGISTRY_ID }}/web:latest
           provenance: false
           sbom: false
           cache-from: type=gha,scope=web
           cache-to: type=gha,mode=max,scope=web
 
-      - name: Образ Caddy
+      - id: build_caddy
+        name: Образ Caddy
+        if: needs.changes.outputs.caddy == 'true'
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: ./deploy/caddy
           push: true
-          tags: cr.yandex/${{ secrets.YC_REGISTRY_ID }}/caddy:${{ github.sha }}
+          tags: |
+            cr.yandex/${{ secrets.YC_REGISTRY_ID }}/caddy:${{ github.sha }}
+            cr.yandex/${{ secrets.YC_REGISTRY_ID }}/caddy:latest
           provenance: false
           sbom: false
           cache-from: type=gha,scope=caddy
@@ -115,11 +193,13 @@ jobs:
 
       - name: Собрать спецификацию контейнеров
         env:
-          API_IMAGE: cr.yandex/${{ secrets.YC_REGISTRY_ID }}/api:${{ github.sha }}
-          WEB_IMAGE: cr.yandex/${{ secrets.YC_REGISTRY_ID }}/web:${{ github.sha }}
-          CADDY_IMAGE: cr.yandex/${{ secrets.YC_REGISTRY_ID }}/caddy:${{ github.sha }}
+          API_IMAGE: cr.yandex/${{ secrets.YC_REGISTRY_ID }}/api:${{ needs.changes.outputs.backend == 'true' && github.sha || 'latest' }}
+          WEB_IMAGE: cr.yandex/${{ secrets.YC_REGISTRY_ID }}/web:${{ needs.changes.outputs.frontend == 'true' && github.sha || 'latest' }}
+          CADDY_IMAGE: cr.yandex/${{ secrets.YC_REGISTRY_ID }}/caddy:${{ needs.changes.outputs.caddy == 'true' && github.sha || 'latest' }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           BOT_USERNAME: ${{ secrets.BOT_USERNAME }}
+          TELEGRAM_RELAY_URL: ${{ secrets.TELEGRAM_RELAY_URL }}
+          TELEGRAM_RELAY_SECRET: ${{ secrets.TELEGRAM_RELAY_SECRET }}
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           SITE_ADDRESS: ${{ secrets.SITE_ADDRESS }}
           ACME_EMAIL: ${{ secrets.ACME_EMAIL }}
@@ -129,12 +209,14 @@ jobs:
         run: |
           # список переменных явный: $$(date +%u) в сервисе backup подставлять нельзя
           envsubst '${API_IMAGE} ${WEB_IMAGE} ${CADDY_IMAGE} ${BOT_TOKEN} ${BOT_USERNAME}
+                    ${TELEGRAM_RELAY_URL} ${TELEGRAM_RELAY_SECRET}
                     ${POSTGRES_PASSWORD} ${SITE_ADDRESS} ${ACME_EMAIL} ${ACME_CA}
                     ${INIT_DATA_MAX_AGE_SECONDS} ${DEBUG}' \
             < deploy/docker-compose.prod.yml > "$RUNNER_TEMP/spec.yml"
           docker compose -f "$RUNNER_TEMP/spec.yml" config --quiet
 
-      - name: Обновить контейнеры на ВМ
+      - id: update_coi
+        name: Обновить контейнеры на ВМ
         env:
           YC_VM_ID: ${{ secrets.YC_VM_ID }}
         run: |
@@ -159,7 +241,8 @@ jobs:
           done
           echo "::error::операция не завершилась за 150 секунд"; exit 1
 
-      - name: Проверить, что сайт отвечает
+      - id: healthcheck
+        name: Проверить, что сайт отвечает
         continue-on-error: true
         env:
           YC_VM_ID: ${{ secrets.YC_VM_ID }}
@@ -176,3 +259,36 @@ jobs:
             sleep 10
           done
           echo "::warning::сайт не ответил за 5 минут"
+
+      - name: Вывести результат
+        if: always()
+        env:
+          BACKEND_CHANGED: ${{ needs.changes.outputs.backend }}
+          FRONTEND_CHANGED: ${{ needs.changes.outputs.frontend }}
+          CADDY_CHANGED: ${{ needs.changes.outputs.caddy }}
+          BACKEND_BUILD_OUTCOME: ${{ steps.build_backend.outcome }}
+          WEB_BUILD_OUTCOME: ${{ steps.build_web.outcome }}
+          CADDY_BUILD_OUTCOME: ${{ steps.build_caddy.outcome }}
+          COI_UPDATE_OUTCOME: ${{ steps.update_coi.outcome }}
+          HEALTHCHECK_OUTCOME: ${{ steps.healthcheck.outcome }}
+        run: |
+          backend_changed=Нет
+          frontend_changed=Нет
+          caddy_changed=Нет
+          if [ "$BACKEND_CHANGED" = "true" ]; then backend_changed=Да; fi
+          if [ "$FRONTEND_CHANGED" = "true" ]; then frontend_changed=Да; fi
+          if [ "$CADDY_CHANGED" = "true" ]; then caddy_changed=Да; fi
+          {
+            echo '## Результат развёртывания'
+            echo
+            echo '| Компонент | Изменён | Результат сборки |'
+            echo '| --- | --- | --- |'
+            echo "| api и bot | $backend_changed | $BACKEND_BUILD_OUTCOME |"
+            echo "| web | $frontend_changed | $WEB_BUILD_OUTCOME |"
+            echo "| caddy | $caddy_changed | $CADDY_BUILD_OUTCOME |"
+            echo
+            echo '| Этап | Результат |'
+            echo '| --- | --- |'
+            echo "| Обновление COI | $COI_UPDATE_OUTCOME |"
+            echo "| Healthcheck | $HEALTHCHECK_OUTCOME |"
+          } >> "$GITHUB_STEP_SUMMARY"

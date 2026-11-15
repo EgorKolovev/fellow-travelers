@@ -3,8 +3,9 @@ import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router';
 import { isUnauthorized } from '../../api/errors';
 import { fetchMe, meQueryKey } from '../../api/me';
+import { GO_TO_BOT_LABEL, SHARE_CONTACT_IN_BOT_TEXT } from '../../lib/botText';
 import { formatName, formatPhone } from '../../lib/format';
-import { getInitDataPhotoUrl } from '../../lib/telegram';
+import { getInitDataPhotoUrl, getStartParamRaw, openBot } from '../../lib/telegram';
 import { useBack } from '../../lib/useBack';
 import { Avatar } from '../../ui/Avatar/Avatar';
 import { Button } from '../../ui/Button/Button';
@@ -14,16 +15,12 @@ import { Screen } from '../../ui/Screen/Screen';
 import { ScreenHeader } from '../../ui/ScreenHeader/ScreenHeader';
 import { ErrorScreen, OpenInTelegramScreen } from '../ErrorScreen/ErrorScreen';
 import styles from './Profile.module.css';
-import { useShareContact } from './useShareContact';
 
 const HEADER = {
   title: 'Ваши данные',
   subtitle: 'Что увидят ваши попутчики',
   step: { current: 1, total: 5 },
 };
-
-const NO_PHONE_HINT =
-  'Телефон нужен, чтобы попутчики могли с вами связаться. Без него нельзя отправить заявку.';
 
 /** Экран `/profile`: шаг «Ваши данные» сам по себе, «Далее» — на «Мои группы». */
 export function Profile() {
@@ -38,7 +35,7 @@ interface Props {
   notice?: string | null;
 }
 
-/** Шаг 1 «Ваши данные»: профиль из /me и «Поделиться номером»; «Далее» — только с телефоном. */
+/** Шаг 1 «Ваши данные»: профиль из /me; без телефона — отправка в бота; «Далее» — только с телефоном. */
 export function ProfileForm({ onNext, notice }: Props) {
   const {
     data: me,
@@ -49,10 +46,6 @@ export function ProfileForm({ onNext, notice }: Props) {
     queryKey: meQueryKey,
     queryFn: fetchMe,
     retry: false,
-  });
-  const { sharing, share } = useShareContact(async () => {
-    const result = await refetch();
-    return result.data?.has_phone ?? false;
   });
 
   if (isPending) {
@@ -93,11 +86,11 @@ export function ProfileForm({ onNext, notice }: Props) {
         <Field
           label="Номер телефона"
           value={me.phone ? formatPhone(me.phone) : ''}
-          hint={me.has_phone ? undefined : NO_PHONE_HINT}
+          hint={me.has_phone ? undefined : SHARE_CONTACT_IN_BOT_TEXT}
         />
         {!me.has_phone && (
-          <Button variant="secondary" onClick={() => void share()} disabled={sharing}>
-            Поделиться номером
+          <Button variant="secondary" onClick={() => openBot(getStartParamRaw())}>
+            {GO_TO_BOT_LABEL}
           </Button>
         )}
       </div>

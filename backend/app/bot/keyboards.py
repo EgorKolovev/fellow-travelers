@@ -17,21 +17,21 @@ def mini_app_link(param: str | None) -> str:
 
 def phone_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=texts.SHARE_PHONE_BUTTON, request_contact=True)]],
-        one_time_keyboard=True,
+        keyboard=[
+            [KeyboardButton(text=texts.SHARE_PHONE_BUTTON, request_contact=True, style="primary")]
+        ],
         resize_keyboard=True,
+        is_persistent=True,
+        input_field_placeholder=texts.PHONE_INPUT_PLACEHOLDER,
     )
 
 
 def app_keyboard(join_code: str | None = None) -> InlineKeyboardMarkup:
-    """Кнопки приложения; с кодом приглашения первая кнопка ведёт на вступление в группу."""
+    """Одна кнопка: с кодом приглашения — вступление в группу, иначе — вход в админку."""
     if join_code is None:
-        first = InlineKeyboardButton(text=texts.OPEN_APP_BUTTON, url=mini_app_link(None))
+        button = InlineKeyboardButton(text=texts.ADMIN_BUTTON, url=mini_app_link("admin"))
     else:
-        first = InlineKeyboardButton(text=texts.JOIN_BUTTON, url=mini_app_link(f"join_{join_code}"))
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [first],
-            [InlineKeyboardButton(text=texts.ADMIN_BUTTON, url=mini_app_link("admin"))],
-        ]
-    )
+        button = InlineKeyboardButton(
+            text=texts.JOIN_BUTTON, url=mini_app_link(f"join_{join_code}")
+        )
+    return InlineKeyboardMarkup(inline_keyboard=[[button]])

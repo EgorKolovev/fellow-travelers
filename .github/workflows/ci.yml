@@ -1,34 +1,96 @@
 name: CI
 
 on:
-  pull_request:
   workflow_call:
+  pull_request:
 
 permissions:
   contents: read
 
 jobs:
-  check:
+  backend:
+    name: Backend pytest
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: fellow
+          POSTGRES_PASSWORD: fellow
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fellow"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      TEST_DATABASE_URL: postgresql+asyncpg://fellow:fellow@localhost:5432/fellow_travelers_test
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
+      # python3.12 нужен make-правилу venv (backend/.venv)
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version: "3.12"
+          python-version: '3.12'
 
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: "24.22.2"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
+      # одна и та же версия uv и локально, и в CI: lock-файлы генерируются ею, lock-check сравнивает байт-в-байт
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: "0.10.3"
+          enable-cache: true
+          cache-dependency-glob: backend/requirements*.lock
 
       - name: Lock-файлы соответствуют pyproject.toml
         run: make lock-check
 
-      - name: Проверки бэкенда и фронта
-        run: make check
+      # venv собирается из requirements-dev.lock (правило .venv/.installed в Makefile)
+      - name: Install dependencies
+        run: make backend/.venv/.installed
+
+      - name: Run lint and typecheck
+        run: make lint fmt-check typecheck
+
+      - id: pytest
+        name: Run pytest
+        run: make test-backend
+
+      - name: Вывести результат
+        if: always()
+        env:
+          PYTEST_OUTCOME: ${{ steps.pytest.outcome }}
+        run: |
+          {
+            echo '## Backend pytest'
+            echo
+            echo "Результат тестов: **$PYTEST_OUTCOME**"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  frontend:
+    name: Frontend Vitest
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - id: vitest
+        name: Run Vitest
+        run: npm test
+      - name: Вывести результат
+        if: always()
+        env:
+          VITEST_OUTCOME: ${{ steps.vitest.outcome }}
+        run: |
+          {
+            echo '## Frontend Vitest'
+            echo
+            echo "Результат тестов: **$VITEST_OUTCOME**"
+          } >> "$GITHUB_STEP_SUMMARY"
