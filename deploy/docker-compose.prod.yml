@@ -1,7 +1,7 @@
 services:
   db:
     container_name: db
-    image: postgres:16-alpine
+    image: postgres:16.15-alpine
     environment:
       POSTGRES_USER: fellow
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
@@ -71,7 +71,7 @@ services:
 
   backup:
     container_name: backup
-    image: postgres:16-alpine
+    image: postgres:16.15-alpine
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |

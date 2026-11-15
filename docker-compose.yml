@@ -15,7 +15,7 @@ x-backend: &backend
 
 services:
   db:
-    image: postgres:16-alpine
+    image: postgres:16.15-alpine
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-fellow}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fellow}

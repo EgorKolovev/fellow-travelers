@@ -11,9 +11,6 @@ jobs:
   backend:
     name: Backend pytest
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: backend
     services:
       postgres:
         image: postgres:16-alpine
@@ -30,17 +27,34 @@ jobs:
     env:
       TEST_DATABASE_URL: postgresql+asyncpg://fellow:fellow@localhost:5432/fellow_travelers_test
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # python3.12 нужен make-правилу venv (backend/.venv)
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
-          cache: pip
-          cache-dependency-path: backend/pyproject.toml
+
+      # одна и та же версия uv и локально, и в CI: lock-файлы генерируются ею, lock-check сравнивает байт-в-байт
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.10.3"
+          enable-cache: true
+          cache-dependency-glob: backend/requirements*.lock
+
+      - name: Lock-файлы соответствуют pyproject.toml
+        run: make lock-check
+
+      # venv собирается из requirements-dev.lock (правило .venv/.installed в Makefile)
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        run: make backend/.venv/.installed
+
+      - name: Run lint and typecheck
+        run: make lint fmt-check typecheck
+
       - id: pytest
         name: Run pytest
-        run: pytest -q -W error
+        run: make test-backend
+
       - name: Вывести результат
         if: always()
         env:
@@ -59,8 +73,8 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: npm

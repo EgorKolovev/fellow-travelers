@@ -3,12 +3,14 @@
 #   make dev-setup   — один раз: venv, зависимости, backend/.env, БД, миграции, аэропорты
 #   make dev         — каждый день: БД + свежие тестовые пользователи + бэкенд и фронт вместе
 #   make check       — все проверки бэкенда и фронта
+#   make lint / fmt-check / typecheck / test-backend — проверки бэкенда по отдельности (так их вызывает CI)
 
 SHELL := /bin/bash
 
 BACKEND  := backend
 FRONTEND := frontend
 VENV     := $(BACKEND)/.venv
+VENV_OK  := $(VENV)/.installed
 PY       := $(CURDIR)/$(VENV)/bin/python
 BIN      := $(CURDIR)/$(VENV)/bin
 COMPOSE  := docker compose
@@ -16,18 +18,32 @@ COMPOSE  := docker compose
 # Сколько тестовых пользователей создавать (1..5).
 DEV_USERS ?= 3
 
+LOCK_FLAGS := --universal --generate-hashes --python-version 3.12
+
 .DEFAULT_GOAL := help
-.PHONY: help dev-setup dev db db-stop migrate seed dev-users backend frontend check test
+.PHONY: help dev-setup dev db db-stop migrate seed dev-users backend frontend check test test-backend lint fmt-check typecheck lock lock-check
 
 help: ## Список команд
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  make %-10s %s\n", $$1, $$2}'
 
-dev-setup: $(VENV) $(BACKEND)/.env $(FRONTEND)/node_modules db migrate seed dev-users ## Один раз: всё для разработки
+dev-setup: $(VENV_OK) $(BACKEND)/.env $(FRONTEND)/node_modules db migrate seed dev-users ## Один раз: всё для разработки
 	@echo "Готово. Запуск: make dev"
 
-$(VENV):
-	python3.12 -m venv $(VENV)
-	unset CURL_CA_BUNDLE; $(PY) -m pip install -q -e "$(BACKEND)[dev]"
+# Метка, а не каталог: новый lock-файл переустанавливает зависимости.
+$(VENV_OK): $(BACKEND)/requirements-dev.lock
+	test -d $(VENV) || python3.12 -m venv $(VENV)
+	unset CURL_CA_BUNDLE; $(PY) -m pip install -q --require-hashes --no-deps -r $(BACKEND)/requirements-dev.lock
+	unset CURL_CA_BUNDLE; $(PY) -m pip install -q --no-deps -e $(BACKEND)
+	@touch $@
+
+lock: ## Обновить backend/requirements*.lock из pyproject.toml (нужен uv)
+	cd $(BACKEND) && uv pip compile pyproject.toml $(LOCK_FLAGS) -q -o requirements.lock
+	cd $(BACKEND) && uv pip compile pyproject.toml --extra dev $(LOCK_FLAGS) -c requirements.lock -q -o requirements-dev.lock
+
+# Lock-файлы генерируются uv 0.10.3 — та же версия запинена в CI (.github/workflows/ci.yml):
+# lock-check перегенерирует файлы и сравнивает байт-в-байт, поэтому локальный uv должен совпадать с CI.
+lock-check: lock ## Lock-файлы соответствуют pyproject.toml (нужно закоммиченное дерево и uv 0.10.3, как в CI)
+	git diff --exit-code -- $(BACKEND)/requirements.lock $(BACKEND)/requirements-dev.lock
 
 # .env для разработки без Telegram: токен любой строкой, initData живёт неделю.
 $(BACKEND)/.env:
@@ -68,10 +84,23 @@ dev: db migrate dev-users ## Бэкенд и фронт вместе (Ctrl+C о�
 	  (cd $(FRONTEND) && npm run dev) & \
 	  wait
 
-test: db ## Тесты бэкенда и фронта
+test: $(VENV_OK) $(FRONTEND)/node_modules db ## Тесты бэкенда и фронта
 	cd $(BACKEND) && $(BIN)/pytest -q -W error
 	cd $(FRONTEND) && npm test
 
-check: db ## Все проверки: ruff, mypy, pytest; lint, format, typecheck, test, build, check:api
-	cd $(BACKEND) && $(BIN)/ruff check . && $(BIN)/ruff format --check . && $(BIN)/mypy && $(BIN)/pytest -q -W error
+# БД не пререквизит: в CI тесты идут против postgres-service, а не из docker compose.
+test-backend: $(VENV_OK) ## pytest бэкенда (для локального запуска сначала: make db)
+	cd $(BACKEND) && $(BIN)/pytest -q -W error
+
+lint: $(VENV_OK) ## ruff check — линтер бэкенда
+	cd $(BACKEND) && $(BIN)/ruff check .
+
+fmt-check: $(VENV_OK) ## ruff format --check — форматирование бэкенда
+	cd $(BACKEND) && $(BIN)/ruff format --check .
+
+typecheck: $(VENV_OK) ## mypy — типы бэкенда
+	cd $(BACKEND) && $(BIN)/mypy
+
+# db до test-backend: тестам бэкенда нужна БД; порядок пререквизитов make соблюдает.
+check: lint fmt-check typecheck db test-backend $(FRONTEND)/node_modules ## Все проверки: ruff, mypy, pytest; lint, format, typecheck, test, build, check:api (фронт)
 	cd $(FRONTEND) && npm run lint && npm run format:check && npm run typecheck && npm test && npm run build && npm run check:api
