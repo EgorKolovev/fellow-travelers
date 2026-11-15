@@ -7,6 +7,7 @@ import asyncio
 import logging
 import os
 import signal
+import sys
 import time
 from typing import Any
 
@@ -196,6 +197,8 @@ async def test_run_pauses_after_error_instead_of_spinning(
     assert 1 <= script.calls <= 4  # с паузой 0,2 с за 0,5 с не больше нескольких попыток
 
 
+# Windows: os.kill(pid, SIGTERM) — это TerminateProcess: убивает pytest, сигнал не доставляется.
+@pytest.mark.skipif(sys.platform == "win32", reason="os.kill SIGTERM работает только на POSIX")
 @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT])
 async def test_signals_only_set_the_stop_event(sig: signal.Signals) -> None:
     loop = asyncio.get_running_loop()
