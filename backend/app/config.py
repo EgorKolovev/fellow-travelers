@@ -2,7 +2,7 @@ import re
 from functools import lru_cache
 from typing import Self
 
-from pydantic import HttpUrl, SecretStr, field_validator, model_validator
+from pydantic import Field, HttpUrl, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _BOT_USERNAME = re.compile(r"[A-Za-z0-9_]{5,32}")
@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     telegram_relay_secret: SecretStr = SecretStr("")
     init_data_max_age_seconds: int = 86400
     debug: bool = False
+    log_level: str = "INFO"
+    # порт, на котором воркер отдаёт метрики Prometheus (только внутри сети compose)
+    worker_metrics_port: int = Field(default=9100, ge=1, le=65535)
     web_app_url: str | None = None
 
     @field_validator("bot_username")

@@ -37,6 +37,18 @@ def test_bot_username_invalid(monkeypatch: pytest.MonkeyPatch, raw: str) -> None
         make_settings(monkeypatch, raw)
 
 
+def test_log_level_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LOG_LEVEL", raising=False)
+
+    assert make_settings(monkeypatch, "my_bot1").log_level == "INFO"
+
+
+def test_log_level_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+
+    assert make_settings(monkeypatch, "my_bot1").log_level == "DEBUG"
+
+
 def make_web_app_url(monkeypatch: pytest.MonkeyPatch, raw: str) -> str | None:
     monkeypatch.setenv("BOT_USERNAME", "my_bot1")
     monkeypatch.setenv("WEB_APP_URL", raw)

@@ -1,7 +1,7 @@
 from datetime import UTC, datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
-from app.matching import MatchCandidate
+from app.matching import MatchCandidate, OpenTransfer
 
 AIRPORT = UUID(int=1)
 OTHER_AIRPORT = UUID(int=2)
@@ -27,3 +27,7 @@ def cand(
         baggage=bag,
         max_wait=timedelta(minutes=wait),
     )
+
+
+def open_transfer(*members: MatchCandidate, id: UUID | None = None) -> OpenTransfer:
+    return OpenTransfer(id=id or uuid4(), members=members)

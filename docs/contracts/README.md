@@ -92,7 +92,7 @@ Authorization: tma <initData>
                  ▼
    ┌────────► searching ──(подбор)──► assigned
    │             │  ▲                   │
-   │   go-solo   │  │ resume-search     │ go-solo / cancel / (MVP) несовместимое изменение
+   │   go-solo   │  │ resume-search     │ go-solo / cancel
    │             ▼  │                   ▼
    │            solo ◄──────────────────┘ (выход из трансфера)
    │             │
@@ -100,6 +100,9 @@ Authorization: tma <initData>
                  ▼
              cancelled  (resume-search возвращает в searching)
 ```
+
+Сервис сам переводит `assigned` → `searching`, если после правки рейса заявка больше не подходит попутчикам
+или трансфер расформирован. Заявка при этом снова проходит подбор.
 
 ## 6. Ссылки и deep link
 
@@ -135,6 +138,7 @@ Push/WebSocket нет. Фронт перезапрашивает данные п
 | Заявка | `GET /events/{id}/trips`, `GET/PUT /events/{id}/my-application` |
 | Моя поездка | `GET /events/{id}/my-trip`, действия `POST /events/{id}/my-application/{go-solo,resume-search,cancel}`, `PUT .../marks` |
 | Управление: участники | `GET /events/{id}/admin/participants`, `GET /events/{id}/admin/transfers` |
+| Управление: история | `GET /events/{id}/admin/history?limit=&before_seq=` |
 | (MVP) Табло, правка составов | `GET /events/{id}/admin/board`, `PUT /events/{id}/admin/transfers/{tid}/members`, `POST .../admin/applications/{aid}/departed` |
 
 ## 9. Роли и доступ
@@ -158,13 +162,47 @@ Push/WebSocket нет. Фронт перезапрашивает данные п
   UI предлагает вступить по своему приглашению.
 - Ответ на `PUT /my-application` и на действия уже отражает результат подбора: если попутчики нашлись
   сразу, придёт `status: "assigned"` и `transfer_id`.
+- Новая заявка может попасть и в уже собранный трансфер, если в нём есть свободное место, никто ещё не
+  уехал и состав собран автоматически. Поэтому у участников трансфера может появиться третий попутчик.
 - `PUT` при статусе `assigned` → `409 APPLICATION_LOCKED`: чтобы изменить заявку, участник сначала
   выходит из трансфера («Еду самостоятельно» или «Отменить»), затем «Вернуться в поиск».
 - `PUT` при статусе `solo` меняет данные, но статус остаётся `solo`; при `cancelled` — заявка
   возвращается в `searching`.
 - Если из трансфера вышел один из двоих, трансфер расформировывается, оставшийся снова ищет попутчиков.
-  Если из троих — двое остаются вместе (замену в pre-MVP не ищем).
+  Если из троих — двое остаются вместе, а сервис ищет им третьего среди заявок в поиске.
   Если оставшийся уже отметил «Уехал», он получает статус `solo`, а не `searching`.
+- После `PATCH /trips/{id}` с новым временем прибытия или аэропортом трансферы группы пересчитываются в фоне
+  за несколько секунд. Из трансфера выходит только заявка, которой новое время больше не подходит;
+  задержка в пределах ожидания состав не меняет. Экраны видят результат при следующем запросе.
 - «Уехал» необратимо в pre-MVP: после него любые изменения → `409 ALREADY_DEPARTED`. Отметка
   «Уехал» не меняет статус заявки.
 - Повторные `go-solo`, `resume-search`, `departed=true` идемпотентны — отвечают `200` с текущим состоянием.
+
+## 11. История
+
+`GET /events/{id}/admin/history` — только админу группы. Записи идут от новых к старым, страница до `limit`
+(по умолчанию 100, максимум 200). Следующая страница — `?before_seq=<next_before_seq>`; `null` — дальше записей нет.
+История хранится вместе с группой и удаляется вместе с ней; телефонов и username в ней нет.
+
+`actor_kind`: `participant` — сам участник, `admin` — создатель группы, `system` — сервис (подбор и пересчёт).
+`reason` объясняет, почему произошло изменение, и может быть `null`.
+
+| `action` | Когда | `details` |
+| --- | --- | --- |
+| `application_submitted` | Первая отправка заявки | `status` |
+| `application_updated` | Повторный `PUT` | `changed_fields`, `status` |
+| `status_changed` | Смена статуса вне трансфера (go-solo, resume-search, cancel) | `from_status`, `to_status` |
+| `marks_changed` | «Я на месте» или «Уехал» | `at_meeting_point`, `departed` |
+| `transfer_created` | Собран новый трансфер | `application_ids` |
+| `transfer_joined` | Заявка дополнила трансфер | — |
+| `transfer_left` | Заявка вышла из трансфера, в том числе при расформировании | `from_status`, `to_status` |
+| `transfer_dissolved` | В трансфере осталось меньше двух заявок | `application_ids` — кто остался |
+| `transfer_departed` | Все участники уехали | — |
+| `trip_updated` | Админ исправил рейс | `changed_fields`, `effective_arrival_before`, `effective_arrival_after` |
+
+Состав любого трансфера восстанавливается по записям: `transfer_created.details.application_ids`, плюс
+`transfer_joined`, минус `transfer_left`.
+
+Для трансферов, собранных до появления истории, запись `transfer_created` добавлена при обновлении: `reason`
+равен `null`, `occurred_at` — время создания трансфера, `seq` — момент обновления. Остальных событий до
+обновления в истории нет.

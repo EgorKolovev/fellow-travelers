@@ -34,7 +34,9 @@
 
 - Postgres проекта — Docker: `cd backend && docker compose up -d db`, хост-порт **5434**
   (5432 занят локальным Postgres 17, 5433 — чужим контейнером). Docker Desktop может быть выключен — запустить.
-- venv: `backend/.venv` (Python 3.12). `uv` не установлен — используем `pip install -e ".[dev]"`.
+- venv: `backend/.venv` (Python 3.12). Зависимости — из lock-файла:
+  `pip install --require-hashes --no-deps -r requirements-dev.lock`, затем `pip install --no-deps -e .`.
+  После правки зависимостей в `pyproject.toml` lock обновляется `make lock` (нужен uv).
 - Переменная `CURL_CA_BUNDLE` на машине указывает на несуществующий файл → pip падает на HTTPS.
   В своём shell: `unset CURL_CA_BUNDLE`.
 - Проверки (все четыре перед каждым коммитом, с `set -o pipefail`, если есть пайпы):

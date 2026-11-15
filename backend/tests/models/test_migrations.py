@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from app.models import Application, Base
 from tests.db import alembic_config, migrate_from_scratch
-from tests.factories import make_application
+from tests.factories import make_application, make_audit_log
 
 
 def _diff(connection: Connection) -> list[object]:
@@ -82,5 +82,63 @@ async def test_wait_minutes_downgrade_coerces_to_legacy_values_then_upgrade(
         assert "ck_applications_max_wait_minutes_allowed" not in constraints
     finally:
         # закоммиченные данные и схему возвращаем в исходное состояние
+        await asyncio.to_thread(migrate_from_scratch, migrated_database)
+        await db_engine.dispose()
+
+
+async def _audit_log_objects(engine: AsyncEngine) -> tuple[bool, set[str], set[str]]:
+    """Есть ли таблица audit_log, какие у неё триггеры и есть ли функция триггера.
+
+    Autogenerate триггеры и функции не сравнивает, поэтому их наличие проверяем напрямую.
+    """
+    async with engine.connect() as connection:
+        table = await connection.scalar(text("SELECT to_regclass('audit_log') IS NOT NULL"))
+        triggers = await connection.execute(
+            text(
+                "SELECT tgname FROM pg_trigger"
+                " WHERE tgrelid = to_regclass('audit_log') AND NOT tgisinternal"
+            )
+        )
+        functions = await connection.execute(
+            text("SELECT proname FROM pg_proc WHERE proname = 'audit_log_forbid_change'")
+        )
+        return bool(table), set(triggers.scalars()), set(functions.scalars())
+
+
+async def test_audit_log_trigger_and_function_exist_at_head(db_engine: AsyncEngine) -> None:
+    table, triggers, functions = await _audit_log_objects(db_engine)
+
+    assert table
+    assert triggers == {"audit_log_append_only", "audit_log_no_truncate"}
+    assert functions == {"audit_log_forbid_change"}
+
+
+async def test_audit_log_downgrade_drops_table_trigger_and_function_then_upgrade(
+    db_engine: AsyncEngine, migrated_database: str
+) -> None:
+    # Given: в audit_log есть закоммиченная запись, а триггер запрещает её удалять
+    async with AsyncSession(db_engine) as session:
+        await make_audit_log(session)
+        await session.commit()
+    try:
+        # When: откат 0003 -> 0002 (DROP TABLE срабатывает и при непустой таблице)
+        await asyncio.to_thread(command.downgrade, alembic_config(), "0002")
+        await db_engine.dispose()
+
+        # Then: нет ни таблицы, ни триггера, ни функции
+        assert await _audit_log_objects(db_engine) == (False, set(), set())
+
+        # When: снова upgrade head — Then: всё на месте, таблица пустая
+        await asyncio.to_thread(command.upgrade, alembic_config(), "head")
+        await db_engine.dispose()
+        table, triggers, functions = await _audit_log_objects(db_engine)
+        assert (table, triggers, functions) == (
+            True,
+            {"audit_log_append_only", "audit_log_no_truncate"},
+            {"audit_log_forbid_change"},
+        )
+        async with db_engine.connect() as connection:
+            assert await connection.scalar(text("SELECT count(*) FROM audit_log")) == 0
+    finally:
         await asyncio.to_thread(migrate_from_scratch, migrated_database)
         await db_engine.dispose()

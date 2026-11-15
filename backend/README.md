@@ -72,6 +72,34 @@ docker compose up --build        # API на http://localhost:8000, провер�
 Настройка в @BotFather: `/newapp` (или Bot Settings → Configure Mini App) — создать **Main Mini App**, указать
 URL мини-приложения. Ссылки `https://t.me/<bot>?startapp=<param>` работают только при настроенном Main Mini App.
 
+## Воркер фоновых заданий
+
+Процесс `python -m app.worker` (сервис `worker` в compose, `make worker` без Docker) раз в 2 секунды забирает из
+таблицы `background_jobs` готовое задание и выполняет его. Сейчас заданий один вид: `reconcile_trip`. Его ставит
+`PATCH /trips/{id}` в той же транзакции, если изменилось расчётное прибытие или аэропорт прилёта. Воркер
+проверяет трансферы группы: заявки, которым новое время не подходит, возвращаются в поиск, освободившиеся места
+занимают ждущие заявки. Без воркера правка рейса сохраняется, но трансферы не пересчитываются.
+
+При ошибке задание повторяется через `min(5·2^n, 900)` секунд, где `n` — число прошлых неудач. В `last_error`
+лежит только имя класса исключения. После 8 неудач задание получает статус `failed` и больше не берётся, в лог
+уходит запись уровня ERROR. Увидеть такие задания и вернуть одно в работу:
+
+```sql
+SELECT id, event_id, kind, attempts, last_error FROM background_jobs WHERE status = 'failed';
+UPDATE background_jobs SET status = 'pending', attempts = 0, run_after = now() WHERE id = '...';
+```
+
+Метрики Prometheus воркер отдаёт на порту `WORKER_METRICS_PORT` (по умолчанию 9100), `GET /metrics`; порт
+не публикуется наружу, читать его можно из сети compose. Кроме метрик подбора (`ft_match_*`,
+`ft_transfer_*`) там есть `ft_worker_jobs_total`, `ft_worker_job_duration_seconds`, `ft_worker_queue_depth`
+(по статусам `pending` и `failed`), `ft_worker_oldest_job_age_seconds` и `ft_worker_last_poll_timestamp_seconds`.
+Счётчики растут только после commit: откатившийся пересчёт их не меняет. Healthcheck сервиса
+(`python -m app.worker.healthcheck`) успешен, если последний опрос очереди был не больше 60 секунд назад.
+
+Остановка по SIGTERM или Ctrl+C: текущее задание доводится до конца, затем процесс выходит. Несколько
+экземпляров воркера безопасны: задания делятся через `FOR UPDATE SKIP LOCKED`, а изменения одной группы
+сериализует advisory-блокировка.
+
 ## Миграции
 
 ```bash
@@ -80,3 +108,19 @@ URL мини-приложения. Ссылки `https://t.me/<bot>?startapp=<pa
 # в compose: docker compose run --rm api alembic upgrade head
 .venv/Scripts/python -m app.seeds.locations   # справочник аэропортов из data/airports.csv (идемпотентно)
 ```
+
+## Откат релиза в проде
+
+Контейнер `api` при старте выполняет `alembic upgrade head`. Старый образ не знает новых ревизий, поэтому
+после простого revert он падает с «Can't locate revision» и перезапускается по кругу. Схему нужно откатить
+**до** revert, пока на ВМ работает новый образ.
+
+1. Сохранить дамп: `sudo docker exec db pg_dump -U fellow -d fellow_travelers | gzip > ~/pre-rollback.sql.gz`.
+2. Откатить схему новым образом до ревизии старого релиза (для релиза с историей и воркером — `0002`):
+   `sudo docker exec api alembic downgrade 0002`. Таблицы `audit_log` и `background_jobs` удаляются вместе
+   с данными: история с момента обновления пропадёт, она остаётся только в дампе.
+3. Сделать revert слияния в `main` и запушить: деплой соберёт и поставит старые образы.
+4. Проверить: `curl -s -o /dev/null -w '%{http_code}' https://<сайт>/api/v1/me` даёт 401, а не 502.
+
+Заявки и трансферы при откате схемы не меняются. Составы, которые воркер успел дополнить или разбить, остаются
+такими же и после отката.

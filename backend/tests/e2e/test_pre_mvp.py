@@ -12,10 +12,10 @@ from httpx import AsyncClient, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Application, Transfer, User
+from app.models import Application, Transfer
 from app.services.users import TelegramProfile, save_phone
 from tests.api.conftest import auth_headers
-from tests.factories import make_application, make_transfer
+from tests.helpers.audit_replay import assert_history_matches_transfers, audit_rows
 from tests.helpers.contract import assert_contract
 
 INSTRUCTION = "Встречаемся у стойки информации в терминале D, затем идём к парковке P1"
@@ -248,7 +248,8 @@ def by_name(participants: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 async def assert_invariants(session: AsyncSession, event_id: uuid.UUID) -> None:
     """Инварианты БД: assigned только с трансфером; в трансфере >= 2 заявок, <= 3 пассажиров,
-    <= 2 мест багажа; заявка входит не более чем в один трансфер."""
+    <= 2 мест багажа; заявка входит не более чем в один трансфер; история аудита восстанавливает
+    те же составы трансферов."""
     session.expire_all()
     applications = (
         await session.scalars(select(Application).where(Application.event_id == event_id))
@@ -269,6 +270,7 @@ async def assert_invariants(session: AsyncSession, event_id: uuid.UUID) -> None:
         assert len(group) >= 2
         assert sum(2 if a.with_companion else 1 for a in group) <= 3
         assert sum(a.baggage_count for a in group) <= 2
+    await assert_history_matches_transfers(session, event_id)
 
 
 # ---------------------------------------------------------------- сценарий
@@ -438,9 +440,11 @@ async def test_pre_mvp_full_scenario(api_client: AsyncClient, db_session: AsyncS
     people = by_name(await admin_participants(c, event_id))
     assert people["Борис"]["application"]["status"] == "solo"
     assert people["Алиса"]["application"]["status"] == "solo"
-    # Автоматической замены нет: Глеб и Дима по-прежнему ищут и не собраны.
+    # После выхода Б заполнение ничего не нашло: Глеб и Дима несовместимы по багажу, Эрик на рейсе
+    # в DME один (Вера там уже уехала). Все трое по-прежнему ищут и не собраны.
     assert people["Глеб"]["application"]["status"] == "searching"
     assert people["Дима"]["application"]["status"] == "searching"
+    assert people["Эрик"]["application"]["status"] == "searching"
 
     # Шаг 7. Посторонний не видит группу.
     await share_phone(s, STRANGER)
@@ -459,38 +463,53 @@ async def test_pre_mvp_full_scenario(api_client: AsyncClient, db_session: AsyncS
 
     await assert_invariants(s, uuid.UUID(event_id))
 
+    # История группы: что произошло, в каком порядке и по какой причине.
+    history = await audit_rows(s, uuid.UUID(event_id))
+    assert [(row.action, row.reason, row.actor_kind) for row in history] == [
+        ("application_submitted", None, "participant"),  # А
+        ("application_submitted", None, "participant"),  # Б
+        ("transfer_created", "auto_match", "system"),  # пара А + Б
+        ("application_submitted", None, "participant"),  # В
+        ("application_submitted", None, "participant"),  # Г
+        ("application_submitted", None, "participant"),  # Д
+        ("marks_changed", None, "participant"),  # А: на месте
+        ("marks_changed", None, "participant"),  # А: уехал
+        ("marks_changed", None, "participant"),  # В: уехал
+        ("application_submitted", None, "participant"),  # Эрик
+        ("transfer_left", "go_solo", "participant"),  # Б вышел
+        ("transfer_left", "member_left", "participant"),  # А уехал, остаётся solo
+        ("transfer_dissolved", "member_left", "participant"),
+    ]
+    assert history[-3].subject_user_id != history[-2].subject_user_id
+    assert history[-3].actor_user_id == history[-2].actor_user_id == history[-1].actor_user_id
+    assert history[-2].details == {"from_status": "assigned", "to_status": "solo"}
 
-async def test_pre_mvp_triple_leave_keeps_others_together(
+
+async def test_pre_mvp_triple_is_assembled_and_refilled_through_api(
     api_client: AsyncClient, db_session: AsyncSession
 ) -> None:
-    """Шаг 6 для трансфера из трёх: после выхода одного остальные двое остаются вместе.
-
-    Подбор строит пары, поэтому тройку готовим фабриками; всё остальное идёт через API.
-    """
+    """Шаг 6 для трансфера из трёх: третий дополняет пару, после выхода одного двое остаются
+    вместе, а освободившееся место занимает новая заявка (при выходе — из тех, кто уже ждёт)."""
     c, s = api_client, db_session
     event_id, code = await create_event(c, "Тройка")
     trio = (ALICE, BORIS, VERA)
     trips = [
         await add_trip(c, event_id, "SVO", f"2026-11-12T10:0{i}:00", f"SU {i}") for i in range(3)
     ]
-    for who in trio:
+    for who in (*trio, IGOR, ERIK):
         await join(c, s, who, code)
-    transfer = await make_transfer(s, event_id=uuid.UUID(event_id))
-    for who, trip_id in zip(trio, trips, strict=True):
-        user = (
-            await s.execute(select(User).where(User.telegram_id == who.telegram_id))
-        ).scalar_one()
-        await make_application(
-            s,
-            event_id=uuid.UUID(event_id),
-            user_id=user.id,
-            trip_id=uuid.UUID(trip_id),
-            transfer_id=transfer.id,
-            baggage_count=0,
-        )
-    await assert_invariants(s, uuid.UUID(event_id))
+
+    # А и Б собираются в пару, В дополняет её до тройки: трансфер тот же, а не новый.
+    first = await apply(c, s, event_id, ALICE, trips[0])
+    assert first.json()["status"] == "searching"
+    pair = await apply(c, s, event_id, BORIS, trips[1])
+    assert pair.json()["status"] == "assigned"
+    transfer_id = pair.json()["transfer_id"]
+    third = await apply(c, s, event_id, VERA, trips[2])
+    assert (third.json()["status"], third.json()["transfer_id"]) == ("assigned", transfer_id)
     for who in trio:
         view = (await my_trip(c, event_id, who))["transfer"]
+        assert view["id"] == transfer_id
         assert view["passengers_total"] == 3
         assert member_names(view) == ["Алиса", "Борис", "Вера"]
 
@@ -502,18 +521,44 @@ async def test_pre_mvp_triple_leave_keeps_others_together(
     for who in (ALICE, VERA):
         view = await my_trip(c, event_id, who)
         assert view["application"]["status"] == "assigned"
-        assert view["transfer"]["id"] == str(transfer.id)
+        assert view["transfer"]["id"] == transfer_id
         assert member_names(view["transfer"]) == ["Алиса", "Вера"]
         assert view["transfer"]["passengers_total"] == 2
     assert (await my_trip(c, event_id, BORIS))["transfer"] is None
     transfers = await admin_transfers(c, event_id)
-    assert [t["id"] for t in transfers] == [str(transfer.id)]
+    assert [t["id"] for t in transfers] == [transfer_id]
     assert member_names(transfers[0]) == ["Алиса", "Вера"]
 
-    # Автоматической замены нет: новая совместимая заявка в трансфер не попадает.
-    await join(c, s, IGOR, code)
-    late = await apply(c, s, event_id, IGOR, trips[0], wait=15)
-    assert (late.json()["status"], late.json()["transfer_id"]) == ("searching", None)
+    # Место свободно: новая совместимая заявка Игоря дополняет пару, трансфер снова полный.
+    late = await apply(c, s, event_id, IGOR, trips[0])
+    assert (late.json()["status"], late.json()["transfer_id"]) == ("assigned", transfer_id)
     transfers = await admin_transfers(c, event_id)
-    assert member_names(transfers[0]) == ["Алиса", "Вера"]
+    assert member_names(transfers[0]) == ["Алиса", "Вера", "Игорь"]
+
+    # Эрик приходит в полную машину и ждёт; когда Алиса выходит, место достаётся ему.
+    waiting = await apply(c, s, event_id, ERIK, trips[1])
+    assert (waiting.json()["status"], waiting.json()["transfer_id"]) == ("searching", None)
+    left = await act(c, s, event_id, ALICE, "cancel")
+    assert (left.json()["status"], left.json()["transfer_id"]) == ("cancelled", None)
+    erik = await my_application(c, event_id, ERIK)
+    assert (erik["status"], erik["transfer_id"]) == ("assigned", transfer_id)
+    transfers = await admin_transfers(c, event_id)
+    assert [t["id"] for t in transfers] == [transfer_id]
+    assert member_names(transfers[0]) == ["Вера", "Игорь", "Эрик"]
     await assert_invariants(s, uuid.UUID(event_id))
+
+    # В истории: сборка, дополнения, выходы и причины посадок; составы восстанавливаются.
+    history = await audit_rows(s, uuid.UUID(event_id))
+    assert [(row.action, row.reason, row.actor_kind) for row in history] == [
+        ("application_submitted", None, "participant"),  # А
+        ("application_submitted", None, "participant"),  # Б
+        ("transfer_created", "auto_match", "system"),  # пара А + Б
+        ("application_submitted", None, "participant"),  # В
+        ("transfer_joined", "auto_match", "system"),  # В дополняет пару
+        ("transfer_left", "go_solo", "participant"),  # Б вышел, двое остались
+        ("application_submitted", None, "participant"),  # Игорь
+        ("transfer_joined", "auto_match", "system"),  # Игорь дополняет пару
+        ("application_submitted", None, "participant"),  # Эрик
+        ("transfer_left", "cancel", "participant"),  # А отменила
+        ("transfer_joined", "auto_fill", "system"),  # Эрик занимает её место
+    ]

@@ -10,9 +10,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
+    ActorKind,
     Application,
     ApplicationStatus,
+    AuditAction,
+    AuditLog,
+    BackgroundJob,
     Event,
+    JobKind,
     Location,
     LocationKind,
     Membership,
@@ -110,3 +115,26 @@ async def make_application(session: AsyncSession, **kw: Any) -> Application:
     session.add(application)
     await session.flush()
     return application
+
+
+async def make_audit_log(session: AsyncSession, **kw: Any) -> AuditLog:
+    """Запись истории; без явного event_id создаёт группу, по умолчанию — действие системы."""
+    if "event_id" not in kw:
+        kw["event_id"] = (await make_event(session)).id
+    kw.setdefault("action", AuditAction.TRIP_UPDATED)
+    kw.setdefault("actor_kind", ActorKind.SYSTEM)
+    entry = AuditLog(**kw)
+    session.add(entry)
+    await session.flush()
+    return entry
+
+
+async def make_job(session: AsyncSession, **kw: Any) -> BackgroundJob:
+    """Задание пересчёта; без явного event_id создаёт группу."""
+    if "event_id" not in kw:
+        kw["event_id"] = (await make_event(session)).id
+    kw.setdefault("kind", JobKind.RECONCILE_TRIP)
+    job = BackgroundJob(**kw)
+    session.add(job)
+    await session.flush()
+    return job

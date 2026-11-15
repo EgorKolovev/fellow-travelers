@@ -263,7 +263,11 @@ paths:
       operationId: updateTrip
       tags: [trips]
       summary: Исправить рейс (только админ группы)
-      description: Поля как в TripInput, все необязательны. Запись становится source=manual.
+      description: |
+        Поля как в TripInput, все необязательны. Запись становится source=manual.
+        Если изменились расчётное время прибытия или аэропорт прилёта, трансферы группы пересчитываются
+        в фоне за несколько секунд: заявка, которой новое время больше не подходит, выходит из трансфера
+        и снова ищет попутчиков. Ответ отражает только рейс.
       x-stage: pre-mvp
       requestBody:
         required: true
@@ -626,6 +630,33 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Transfer' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /events/{event_id}/admin/history:
+    parameters:
+      - $ref: '#/components/parameters/EventId'
+    get:
+      operationId: adminGetHistory
+      tags: [admin]
+      summary: История заявок и трансферов группы — кто, когда и почему (новые записи первыми)
+      x-stage: pre-mvp
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 100 }
+        - name: before_seq
+          in: query
+          description: Вернуть записи старше этой — значение next_before_seq из предыдущей страницы
+          schema: { type: integer, minimum: 1 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HistoryPage' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
@@ -1169,3 +1200,72 @@ components:
               application_ids:
                 type: array
                 items: { type: string, format: uuid }
+
+    # ------------------------------------------------------------ история
+    HistoryAction:
+      type: string
+      enum: [application_submitted, application_updated, status_changed, marks_changed,
+             transfer_created, transfer_joined, transfer_left, transfer_dissolved,
+             transfer_departed, trip_updated]
+
+    HistoryReason:
+      type: string
+      enum: [go_solo, cancel, resume_search, auto_match, auto_fill, incompatible_after_change,
+             member_left, all_departed, admin_edit]
+
+    ActorKind:
+      type: string
+      description: participant — сам участник, admin — создатель группы, system — сервис (подбор, пересчёт)
+      enum: [participant, admin, system]
+
+    HistoryPerson:
+      type: object
+      description: Только чтобы понять, о ком запись; без телефона и username
+      required: [user_id, first_name, last_name]
+      properties:
+        user_id: { type: string, format: uuid }
+        first_name: { type: string }
+        last_name: { type: [string, 'null'] }
+
+    HistoryEntry:
+      type: object
+      required: [seq, occurred_at, action, reason, actor_kind, actor, subject, application_id,
+                 transfer_id, trip_id, details]
+      properties:
+        seq: { type: integer, description: Растёт со временем; задаёт порядок записей }
+        occurred_at: { type: string, format: date-time }
+        action: { $ref: '#/components/schemas/HistoryAction' }
+        reason:
+          description: null — прямое действие без отдельной причины
+          oneOf:
+            - $ref: '#/components/schemas/HistoryReason'
+            - type: 'null'
+        actor_kind: { $ref: '#/components/schemas/ActorKind' }
+        actor:
+          description: Кто сделал изменение; null — сервис или профиль удалён
+          oneOf:
+            - $ref: '#/components/schemas/HistoryPerson'
+            - type: 'null'
+        subject:
+          description: Чья заявка; null — запись о рейсе или трансфере целиком, либо профиль удалён
+          oneOf:
+            - $ref: '#/components/schemas/HistoryPerson'
+            - type: 'null'
+        application_id: { type: [string, 'null'], format: uuid }
+        transfer_id: { type: [string, 'null'], format: uuid }
+        trip_id: { type: [string, 'null'], format: uuid }
+        details:
+          type: object
+          description: Поля зависят от action — см. docs/contracts/README.md, раздел «История»
+          additionalProperties: true
+
+    HistoryPage:
+      type: object
+      required: [items, next_before_seq]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/HistoryEntry' }
+        next_before_seq:
+          type: [integer, 'null']
+          description: null — записей старше нет

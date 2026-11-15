@@ -8,7 +8,15 @@ from httpx import AsyncClient, Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Application, Event, Transfer, TransferStatus, User
+from app.models import (
+    Application,
+    Event,
+    Transfer,
+    TransferOrigin,
+    TransferStatus,
+    User,
+)
+from app.observability.metrics import MatchTrigger
 from app.services import applications as applications_service
 from app.services import matching as matching_service
 from tests.api.conftest import USER_TELEGRAM_ID, auth_headers
@@ -21,6 +29,7 @@ from tests.factories import (
     make_trip,
     make_user,
 )
+from tests.helpers.audit_replay import assert_history_matches_transfers, audit_rows
 from tests.helpers.contract import assert_contract
 
 MISSING_ID = "6f1b7a52-3c9e-4f5a-9d44-1a2b3c4d5e6f"
@@ -589,30 +598,147 @@ async def test_departed_not_matched(
     assert (await get_app(api_client, event)).json()["status"] == "searching"
 
 
-async def test_third_is_not_added_to_existing_transfer(
+async def members_of(session: AsyncSession, transfer_id: str) -> int:
+    result = await session.scalar(
+        select(func.count())
+        .select_from(Application)
+        .where(Application.transfer_id == uuid.UUID(transfer_id))
+    )
+    assert result is not None
+    return result
+
+
+async def test_third_joins_existing_pair(
+    api_client: AsyncClient, db_session: AsyncSession, event: Event, p2: User, p3: User
+) -> None:
+    await apply(api_client, db_session, event, 42)
+    pair = await apply(api_client, db_session, event, 101)
+    transfer_id = pair.json()["transfer_id"]
+
+    third = await apply(api_client, db_session, event, 102)
+
+    assert third.status_code == 201
+    assert third.json()["status"] == "assigned"
+    assert third.json()["transfer_id"] == transfer_id
+    for telegram_id in (42, 101):
+        assert (await get_app(api_client, event, telegram_id)).json()["transfer_id"] == transfer_id
+    assert await transfer_count(db_session, event) == 1
+    assert await members_of(db_session, transfer_id) == 3
+    joined = [
+        row for row in await audit_rows(db_session, event.id) if row.action == "transfer_joined"
+    ]
+    assert [(row.reason, row.actor_kind, str(row.transfer_id)) for row in joined] == [
+        ("auto_match", "system", transfer_id)
+    ]
+    assert joined[0].application_id == uuid.UUID(third.json()["id"])
+    await assert_history_matches_transfers(db_session, event.id)
+
+
+async def test_fourth_waits_for_full_transfer_then_pairs_with_fifth(
     api_client: AsyncClient, db_session: AsyncSession, event: Event, p2: User, p3: User
 ) -> None:
     await apply(api_client, db_session, event, 42)
     await apply(api_client, db_session, event, 101)
+    await apply(api_client, db_session, event, 102)  # третий: машина полная
+    fourth = await join(db_session, event, 103)
+    fifth = await join(db_session, event, 104)
+
+    waiting = await apply(api_client, db_session, event, fourth.telegram_id)
+    paired = await apply(api_client, db_session, event, fifth.telegram_id)
+
+    assert waiting.json()["status"] == "searching"
+    assert paired.json()["status"] == "assigned"
+    assert (
+        paired.json()["transfer_id"]
+        == (await get_app(api_client, event, 103)).json()["transfer_id"]
+    )
+    assert await transfer_count(db_session, event) == 2
+
+
+async def test_no_join_when_member_of_transfer_departed(
+    api_client: AsyncClient, db_session: AsyncSession, event: Event, p2: User, p3: User
+) -> None:
+    await apply(api_client, db_session, event, 42)
+    pair = await apply(api_client, db_session, event, 101)
+    await marks(api_client, db_session, event, {"departed": True}, 42)
 
     third = await apply(api_client, db_session, event, 102)
 
     assert third.json()["status"] == "searching"
-    assert await transfer_count(db_session, event) == 1
+    assert third.json()["transfer_id"] is None
+    assert await members_of(db_session, pair.json()["transfer_id"]) == 2
 
 
-async def test_third_assembles_with_next_free(
+async def test_no_join_to_admin_transfer(
+    api_client: AsyncClient, db_session: AsyncSession, event: Event, user: User, p2: User, p3: User
+) -> None:
+    transfer = await make_transfer(db_session, event_id=event.id, origin=TransferOrigin.ADMIN)
+    for person in (user, p2):
+        await make_application(
+            db_session,
+            event_id=event.id,
+            user_id=person.id,
+            trip_id=await trip_at(db_session, event),
+            transfer_id=transfer.id,
+            baggage_count=0,
+        )
+
+    third = await apply(api_client, db_session, event, 102)
+
+    assert third.json()["status"] == "searching"
+    assert await members_of(db_session, str(transfer.id)) == 2
+
+
+async def test_no_join_when_companion_does_not_fit(
     api_client: AsyncClient, db_session: AsyncSession, event: Event, p2: User, p3: User
 ) -> None:
     await apply(api_client, db_session, event, 42)
-    await apply(api_client, db_session, event, 101)
-    await apply(api_client, db_session, event, 102)
-    fourth = await join(db_session, event, 103)
+    pair = await apply(api_client, db_session, event, 101)
 
-    response = await apply(api_client, db_session, event, fourth.telegram_id)
+    third = await apply(api_client, db_session, event, 102, with_companion=True)  # 2 + 2 = 4
+
+    assert third.json()["status"] == "searching"
+    assert await members_of(db_session, pair.json()["transfer_id"]) == 2
+
+
+async def test_no_join_when_baggage_exceeds_limit(
+    api_client: AsyncClient, db_session: AsyncSession, event: Event, p2: User, p3: User
+) -> None:
+    await apply(api_client, db_session, event, 42, baggage_count=1)
+    pair = await apply(api_client, db_session, event, 101, baggage_count=1)
+
+    third = await apply(api_client, db_session, event, 102, baggage_count=1)  # 1 + 1 + 1 = 3 > 2
+
+    assert third.json()["status"] == "searching"
+    assert await members_of(db_session, pair.json()["transfer_id"]) == 2
+
+
+async def test_new_full_group_beats_joining_pair(
+    api_client: AsyncClient, db_session: AsyncSession, event: Event, p2: User, p3: User
+) -> None:
+    await apply(api_client, db_session, event, 101)
+    pair = await apply(api_client, db_session, event, 102)
+    # двое ждут и друг с другом совместимы: сервис к такому состоянию не приводит, ставим фабрикой
+    waiting = [
+        await make_application(
+            db_session,
+            event_id=event.id,
+            trip_id=await trip_at(db_session, event),
+            baggage_count=0,
+        )
+        for _ in range(2)
+    ]
+
+    response = await apply(api_client, db_session, event, 42)
 
     assert response.json()["status"] == "assigned"
+    assert response.json()["transfer_id"] != pair.json()["transfer_id"]
     assert await transfer_count(db_session, event) == 2
+    assert await members_of(db_session, pair.json()["transfer_id"]) == 2
+    assert await members_of(db_session, response.json()["transfer_id"]) == 3
+    for application in waiting:
+        await db_session.refresh(application)
+        assert str(application.transfer_id) == response.json()["transfer_id"]
 
 
 async def test_third_picks_one_of_two_incompatible(
@@ -684,9 +810,11 @@ async def test_leave_pair_rematches_remaining_with_free(
     action: str,
     status: str,
 ) -> None:
+    # 102 прилетает на 20 минут позже 42, ждущей 15: к паре 42 + 101 не садится, но с 101 совместима
     await apply(api_client, db_session, event, 42)
-    await apply(api_client, db_session, event, 101)
-    await apply(api_client, db_session, event, 102)  # свободная, ждёт
+    await apply(api_client, db_session, event, 101, minutes=10)
+    waiting = await apply(api_client, db_session, event, 102, minutes=20)
+    assert waiting.json()["status"] == "searching"
 
     response = await act(api_client, db_session, event, action)
 
@@ -696,6 +824,88 @@ async def test_leave_pair_rematches_remaining_with_free(
     assert second["status"] == third["status"] == "assigned"
     assert second["transfer_id"] == third["transfer_id"] is not None
     assert await transfer_count(db_session, event) == 1
+
+
+@pytest.mark.parametrize(("action", "status"), [("go-solo", "solo"), ("cancel", "cancelled")])
+async def test_leave_pair_remaining_joins_other_open_transfer(
+    api_client: AsyncClient,
+    db_session: AsyncSession,
+    event: Event,
+    p2: User,
+    p3: User,
+    action: str,
+    status: str,
+) -> None:
+    p4 = await join(db_session, event, 103)
+    await apply(api_client, db_session, event, p3.telegram_id)
+    other = await apply(api_client, db_session, event, p4.telegram_id)
+    other_id = other.json()["transfer_id"]
+    # со спутником 42 не помещается в чужой трансфер (2 + 2 пассажира), поэтому ждёт
+    await apply(api_client, db_session, event, 42, with_companion=True)
+    # пара с 42 размещает две заявки, чужой трансфер — одну, поэтому 101 садится к 42
+    pair = await apply(api_client, db_session, event, 101)
+    assert pair.json()["transfer_id"] != other_id
+
+    response = await act(api_client, db_session, event, action)
+
+    assert response.json()["status"] == status
+    remaining = (await get_app(api_client, event, 101)).json()
+    assert remaining["status"] == "assigned"
+    assert remaining["transfer_id"] == other_id
+    assert await transfer_count(db_session, event) == 1
+    assert await members_of(db_session, other_id) == 3
+
+
+@pytest.mark.parametrize(("action", "status"), [("go-solo", "solo"), ("cancel", "cancelled")])
+async def test_leave_triple_fills_place_from_searching(
+    api_client: AsyncClient,
+    db_session: AsyncSession,
+    event: Event,
+    p2: User,
+    p3: User,
+    action: str,
+    status: str,
+) -> None:
+    p4 = await join(db_session, event, 103)
+    await apply(api_client, db_session, event, 42)
+    await apply(api_client, db_session, event, 101)
+    triple = await apply(api_client, db_session, event, 102)
+    transfer_id = triple.json()["transfer_id"]
+    waiting = await apply(api_client, db_session, event, p4.telegram_id)
+    assert waiting.json()["status"] == "searching"  # машина полная
+
+    response = await act(api_client, db_session, event, action)
+
+    assert response.json()["status"] == status
+    assert response.json()["transfer_id"] is None
+    newcomer = (await get_app(api_client, event, p4.telegram_id)).json()
+    assert (newcomer["status"], newcomer["transfer_id"]) == ("assigned", transfer_id)
+    assert await transfer_count(db_session, event) == 1
+    assert await members_of(db_session, transfer_id) == 3
+    history = await audit_rows(db_session, event.id)
+    assert [(row.action, row.reason, row.actor_kind) for row in history[-2:]] == [
+        ("transfer_left", action.replace("-", "_"), "participant"),
+        ("transfer_joined", "auto_fill", "system"),
+    ]
+    assert history[-1].application_id == uuid.UUID(newcomer["id"])
+    assert history[-1].transfer_id == uuid.UUID(transfer_id)
+    await assert_history_matches_transfers(db_session, event.id)
+
+
+async def test_leave_triple_without_waiting_leaves_place_free(
+    api_client: AsyncClient, db_session: AsyncSession, event: Event, p2: User, p3: User
+) -> None:
+    await apply(api_client, db_session, event, 42)
+    await apply(api_client, db_session, event, 101)
+    triple = await apply(api_client, db_session, event, 102)
+
+    await act(api_client, db_session, event, "go-solo")
+    # свободное место осталось: новая совместимая заявка дополняет пару снова
+    p4 = await join(db_session, event, 103)
+    late = await apply(api_client, db_session, event, p4.telegram_id)
+
+    assert late.json()["status"] == "assigned"
+    assert late.json()["transfer_id"] == triple.json()["transfer_id"]
 
 
 @pytest.mark.parametrize(("action", "status"), [("go-solo", "solo"), ("cancel", "cancelled")])
@@ -1073,6 +1283,59 @@ async def test_scenarios_take_event_lock_before_reading_application(
     assert response.status_code in (200, 201)
     assert calls[0] == "lock"
     assert "find" in calls
+
+
+@pytest.fixture
+def fill_calls(monkeypatch: pytest.MonkeyPatch) -> list[uuid.UUID]:
+    """Сколько раз сценарии заявки вызвали `fill_event` (и для какой группы)."""
+    calls: list[uuid.UUID] = []
+    original = matching_service.fill_event
+
+    async def spy(
+        session: AsyncSession, event_id: uuid.UUID, *, trigger: MatchTrigger
+    ) -> matching_service.FillResult:
+        assert trigger == MatchTrigger.LEAVE  # go-solo и cancel заполняют освободившееся место
+        calls.append(event_id)
+        return await original(session, event_id, trigger=trigger)
+
+    monkeypatch.setattr(applications_service, "fill_event", spy)
+    return calls
+
+
+@pytest.mark.parametrize("action", ["go-solo", "cancel"])
+async def test_leaving_transfer_calls_fill_event_once(
+    api_client: AsyncClient,
+    db_session: AsyncSession,
+    event: Event,
+    p2: User,
+    fill_calls: list[uuid.UUID],
+    action: str,
+) -> None:
+    await apply(api_client, db_session, event, 42)
+    await apply(api_client, db_session, event, 101)
+
+    await act(api_client, db_session, event, action)
+
+    assert fill_calls == [event.id]
+
+
+async def test_put_and_resume_search_do_not_call_fill_event(
+    api_client: AsyncClient,
+    db_session: AsyncSession,
+    event: Event,
+    p2: User,
+    fill_calls: list[uuid.UUID],
+) -> None:
+    await apply(api_client, db_session, event, 42)
+    await apply(api_client, db_session, event, 101)
+    await act(api_client, db_session, event, "go-solo", 101)  # выходит из трансфера: один вызов
+    fill_calls.clear()
+
+    await apply(api_client, db_session, event, 101, minutes=1, seek_companions=False)
+    resumed = await act(api_client, db_session, event, "resume-search", 101)
+
+    assert resumed.json()["status"] == "assigned"  # подбор сработал, но fill_event не вызывался
+    assert fill_calls == []
 
 
 async def _me(session: AsyncSession) -> User:

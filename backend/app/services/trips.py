@@ -9,6 +9,8 @@ from sqlalchemy.orm import selectinload
 from app.errors import AppError, ErrorCode
 from app.models import (
     Application,
+    AuditAction,
+    AuditReason,
     Event,
     Location,
     LocationKind,
@@ -19,6 +21,9 @@ from app.models import (
 )
 from app.schemas.trip import TripInput, TripUpdate, normalize_number
 from app.services.access import get_event_for_member
+from app.services.audit import Actor, iso, record
+from app.services.jobs import enqueue_reconcile
+from app.services.matching import lock_event
 from app.timezones import from_local_or_aware
 
 _UNIQUE_VIOLATION = "23505"
@@ -32,6 +37,17 @@ ESTIMATED_ORDER = "Расчётное прибытие должно быть п�
 DUPLICATE_TRIP = "Такой рейс уже добавлен"
 
 _WITH_LOCATIONS = (selectinload(Trip.departure_location), selectinload(Trip.arrival_location))
+
+# поля рейса, чьи изменения попадают в `trip_updated.changed_fields`, в порядке модели
+_AUDITED_FIELDS = (
+    "number",
+    "departure_location_id",
+    "arrival_location_id",
+    "scheduled_departure",
+    "scheduled_arrival",
+    "estimated_arrival",
+    "source",
+)
 
 
 def _fields_error(fields: dict[str, str]) -> AppError:
@@ -59,14 +75,20 @@ def _violation(exc: IntegrityError, sqlstate: str, constraint: str | None = None
 
 
 async def _load_trip(session: AsyncSession, trip_id: uuid.UUID) -> Trip:
-    """Рейс с локациями, свежий из БД (после коммита серверные поля устарели)."""
+    """Рейс с локациями, свежий из БД (после коммита серверные поля устарели).
+
+    Рейс, удалённый параллельно, — 404: админ мог удалить его, пока правка ждала блокировку.
+    """
     stmt = (
         select(Trip)
         .where(Trip.id == trip_id)
         .options(*_WITH_LOCATIONS)
         .execution_options(populate_existing=True)
     )
-    return (await session.execute(stmt)).scalar_one()
+    trip = (await session.execute(stmt)).scalar_one_or_none()
+    if trip is None:
+        raise _trip_not_found()
+    return trip
 
 
 async def list_event_trips(session: AsyncSession, event_id: uuid.UUID) -> list[Trip]:
@@ -153,8 +175,20 @@ async def create_trip(session: AsyncSession, event: Event, data: TripInput) -> T
     return await _load_trip(session, trip.id)
 
 
-async def update_trip(session: AsyncSession, trip: Trip, data: TripUpdate) -> Trip:
+async def update_trip(session: AsyncSession, trip: Trip, data: TripUpdate, actor: Actor) -> Trip:
+    """Исправление рейса админом; в историю пишется, только если рейс действительно изменился.
+
+    Первым берётся `lock_event` группы, затем рейс перечитывается: роутер читал его до блокировки,
+    и параллельная правка могла успеть раньше. Снимок «до» для истории берётся после перечитывания.
+    Если изменилось расчётное прибытие или аэропорт прилёта, в той же транзакции ставится задание
+    пересчёта трансферов: воркер исключит заявки, которым новое время не подходит. Ошибка
+    валидации оставляет БД как была: ни правки, ни записи истории, ни задания.
+    """
+    await lock_event(session, trip.event_id)
+    trip = await _load_trip(session, trip.id)
     changes = {name: getattr(data, name) for name in data.model_fields_set}
+    before = {name: getattr(trip, name) for name in _AUDITED_FIELDS}
+    arrival_before = trip.effective_arrival
     departure, arrival = await _resolve_airports(
         session,
         changes.get("departure_location_id", trip.departure_location_id),
@@ -177,21 +211,40 @@ async def update_trip(session: AsyncSession, trip: Trip, data: TripUpdate) -> Tr
     if estimated_arrival is not None and estimated_arrival <= scheduled_departure:
         raise _fields_error({"estimated_arrival": ESTIMATED_ORDER})
 
-    trip.departure_location_id = departure.id
-    trip.arrival_location_id = arrival.id
-    trip.scheduled_departure = scheduled_departure
-    trip.scheduled_arrival = scheduled_arrival
-    trip.estimated_arrival = estimated_arrival
-    if "number" in changes:
-        trip.number = normalize_number(changes["number"])
-    trip.source = TripSource.MANUAL
     try:
+        # правка внутри savepoint: begin_nested() сначала сбрасывает накопленное, и отказ БД
+        # при записи (дубль номера) откатил бы всю транзакцию, а не только эту правку
         async with session.begin_nested():
+            trip.departure_location_id = departure.id
+            trip.arrival_location_id = arrival.id
+            trip.scheduled_departure = scheduled_departure
+            trip.scheduled_arrival = scheduled_arrival
+            trip.estimated_arrival = estimated_arrival
+            if "number" in changes:
+                trip.number = normalize_number(changes["number"])
+            trip.source = TripSource.MANUAL
             await session.flush()
     except IntegrityError as exc:
         if _violation(exc, _UNIQUE_VIOLATION, _UNIQUE_TRIP):
             raise _fields_error({"number": DUPLICATE_TRIP}) from exc
         raise
+    changed_fields = [name for name in _AUDITED_FIELDS if getattr(trip, name) != before[name]]
+    if trip.effective_arrival != arrival_before or "arrival_location_id" in changed_fields:
+        await enqueue_reconcile(session, event_id=trip.event_id, trip_id=trip.id)
+    if changed_fields:
+        record(
+            session,
+            event_id=trip.event_id,
+            action=AuditAction.TRIP_UPDATED,
+            actor=actor,
+            reason=AuditReason.ADMIN_EDIT,
+            trip_id=trip.id,
+            details={
+                "changed_fields": changed_fields,
+                "effective_arrival_before": iso(arrival_before),
+                "effective_arrival_after": iso(trip.effective_arrival),
+            },
+        )
     await session.commit()
     return await _load_trip(session, trip.id)
 
