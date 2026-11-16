@@ -10,6 +10,7 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -31,6 +32,15 @@ class Trip(TimestampMixin, Base):
             name="uq_trips_event_mode_number_departure",
         ),
         Index("ix_trips_event_id_scheduled_arrival", "event_id", "scheduled_arrival"),
+        # один рейс поставщика на группу; у ручных рейсов provider_ref пуст и в индекс не входит
+        Index(
+            "uq_trips_event_id_provider_ref",
+            "event_id",
+            "provider_ref",
+            unique=True,
+            postgresql_where=text("provider_ref IS NOT NULL"),
+        ),
+        Index("ix_trips_next_poll_at", "next_poll_at"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -53,6 +63,10 @@ class Trip(TimestampMixin, Base):
         str_enum(TripSource, name="trip_source"), server_default=TripSource.MANUAL.value
     )
     provider_ref: Mapped[str | None] = mapped_column(String(128))
+    # опрос поставщика (воркер, T8): когда опрашивать, когда опрашивали, о каком прибытии сообщали
+    next_poll_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_polled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    notified_arrival: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     departure_location: Mapped[Location] = relationship(
         foreign_keys=[departure_location_id], lazy="raise"

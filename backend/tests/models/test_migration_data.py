@@ -16,7 +16,7 @@ import pytest
 from alembic import command
 from fastapi import FastAPI
 from httpx import AsyncClient, Response
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.models import (
@@ -59,13 +59,25 @@ class OldGroup:
     waiting: list[uuid.UUID] = field(default_factory=list)
 
 
+# Поля trips из миграции 0006: ORM-модель Trip их знает и пишет/читает всегда. На схеме 0002 их
+# добавляем на время посева, а перед upgrade убираем, чтобы 0006 отработала как на настоящей БД.
+_TRIPS_COLUMNS_0006 = ("next_poll_at", "last_polled_at", "notified_arrival")
+
+
 async def _to_0002(engine: AsyncEngine) -> None:
     # Alembic (env.py) сам вызывает asyncio.run, поэтому из работающего цикла — только в потоке
     await asyncio.to_thread(command.downgrade, alembic_config(), "0002")
     await engine.dispose()  # соединения пула знают про старую схему
+    async with engine.begin() as connection:
+        for column in _TRIPS_COLUMNS_0006:
+            await connection.execute(text(f"ALTER TABLE trips ADD COLUMN {column} timestamptz"))
 
 
 async def _to_head(engine: AsyncEngine) -> None:
+    async with engine.begin() as connection:
+        for column in _TRIPS_COLUMNS_0006:
+            await connection.execute(text(f"ALTER TABLE trips DROP COLUMN IF EXISTS {column}"))
+    await engine.dispose()
     await asyncio.to_thread(command.upgrade, alembic_config(), "head")
     await engine.dispose()
 

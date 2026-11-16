@@ -82,3 +82,15 @@ def test_web_app_url_default_none(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_web_app_url_requires_https(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
     with pytest.raises(ValidationError, match="WEB_APP_URL"):
         make_web_app_url(monkeypatch, raw)
+
+
+def test_flight_provider_default_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("FLIGHT_PROVIDER", raising=False)
+
+    assert make_settings(monkeypatch, "my_bot1").flight_provider == "none"
+
+
+def test_flight_provider_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FLIGHT_PROVIDER", "fake")
+
+    assert make_settings(monkeypatch, "my_bot1").flight_provider == "fake"

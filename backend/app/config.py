@@ -1,6 +1,6 @@
 import re
 from functools import lru_cache
-from typing import Self
+from typing import Literal, Self
 
 from pydantic import Field, HttpUrl, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     # порт, на котором воркер отдаёт метрики Prometheus (только внутри сети compose)
     worker_metrics_port: int = Field(default=9100, ge=1, le=65535)
     web_app_url: str | None = None
+    # поставщик рейсов: none — не настроен (поиск отвечает 503), fake — тестовый, в памяти
+    flight_provider: Literal["none", "fake"] = "none"
 
     @field_validator("bot_username")
     @classmethod
