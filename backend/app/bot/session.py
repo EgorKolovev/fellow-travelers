@@ -1,10 +1,13 @@
 from collections.abc import AsyncGenerator
 from typing import Any
 
+from aiogram import Bot
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
 from aiohttp import ClientSession
 from yarl import URL
+
+from app.config import Settings
 
 RELAY_SECRET_HEADER = "X-Transfer-Bot-Relay-Secret"
 
@@ -48,3 +51,15 @@ class RelaySession(AiohttpSession):
                     url, headers, timeout, chunk_size, raise_for_status
                 ):
                     yield chunk
+
+
+def build_bot(settings: Settings) -> Bot:
+    """Бот с токеном из настроек; при заданном `TELEGRAM_RELAY_URL` ходит в Telegram через relay."""
+    session = (
+        RelaySession(
+            str(settings.telegram_relay_url), settings.telegram_relay_secret.get_secret_value()
+        )
+        if settings.telegram_relay_url
+        else None
+    )
+    return Bot(token=settings.bot_token.get_secret_value(), session=session)

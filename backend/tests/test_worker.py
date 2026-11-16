@@ -19,6 +19,7 @@ import app.worker.__main__ as worker_main
 from app.config import get_settings
 from app.observability import metrics
 from app.services.jobs import JobOutcome
+from app.services.notification_sender import SendResult
 
 TIMEOUT = 5.0
 SESSION_FACTORY = object()
@@ -283,6 +284,23 @@ async def test_last_poll_is_not_stamped_while_database_is_unreachable(
     assert script.calls == 0
 
 
+def _fake_notifications(monkeypatch: pytest.MonkeyPatch, events: list[str]) -> None:
+    """Бот и цикл отправки подменены: сети нет, видно только порядок запуска и закрытия."""
+
+    class FakeSession:
+        async def close(self) -> None:
+            events.append("bot closed")
+
+    class FakeBot:
+        session = FakeSession()
+
+    async def fake_notifications(stop: asyncio.Event, sender: object) -> None:
+        events.append("notifications")
+
+    monkeypatch.setattr(worker_main, "build_bot", lambda settings: FakeBot())
+    monkeypatch.setattr(worker_main, "run_notification_sender", fake_notifications)
+
+
 async def test_main_starts_metrics_server_runs_worker_and_cleans_up(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -304,6 +322,7 @@ async def test_main_starts_metrics_server_runs_worker_and_cleans_up(
 
     monkeypatch.setattr(worker_main, "start_http_server", start_http_server)
     monkeypatch.setattr(worker_main, "run", fake_run)
+    _fake_notifications(monkeypatch, events)
     monkeypatch.setattr(worker_main, "dispose_engine", fake_dispose)
     monkeypatch.setattr(worker_main, "configure_logging", lambda level: None)
     monkeypatch.setattr(worker_main, "_stop_on_signals", lambda loop, stop: None)
@@ -311,7 +330,14 @@ async def test_main_starts_metrics_server_runs_worker_and_cleans_up(
     await worker_main.main()
 
     port = get_settings().worker_metrics_port
-    assert events == [f"server start {port}", "run", "server shutdown", "dispose"]
+    assert events == [
+        f"server start {port}",
+        "run",
+        "notifications",
+        "bot closed",
+        "server shutdown",
+        "dispose",
+    ]
 
 
 # ---------------------------------------------------------------- опрос рейсов
@@ -414,6 +440,7 @@ async def _run_main(monkeypatch: pytest.MonkeyPatch, provider: object | None) ->
 
     monkeypatch.setattr(worker_main, "start_http_server", lambda port: (FakeServer(), object()))
     monkeypatch.setattr(worker_main, "run", fake_run)
+    _fake_notifications(monkeypatch, events)
     monkeypatch.setattr(worker_main, "run_flight_polling", fake_polling)
     monkeypatch.setattr(worker_main, "build_provider", lambda settings: provider)
     monkeypatch.setattr(worker_main, "dispose_engine", fake_dispose)
@@ -429,7 +456,7 @@ async def test_main_starts_flight_polling_when_provider_is_configured(
 ) -> None:
     events = await _run_main(monkeypatch, object())
 
-    assert sorted(events) == ["polling", "run"]
+    assert sorted(events) == ["bot closed", "notifications", "polling", "run"]
 
 
 async def test_main_skips_flight_polling_without_provider(
@@ -439,8 +466,115 @@ async def test_main_skips_flight_polling_without_provider(
 
     events = await _run_main(monkeypatch, None)
 
-    assert events == ["run"]
+    assert sorted(events) == ["bot closed", "notifications", "run"]
     assert any(
         r.name == "app.worker" and r.levelno == logging.INFO and "опрос рейсов" in r.getMessage()
         for r in caplog.records
     )
+
+
+# ---------------------------------------------------------------- отправка уведомлений
+
+
+class SendScript:
+    """Подмена `send_due`: считает проходы, запоминает аргументы, отдаёт заготовленный итог."""
+
+    def __init__(self, result: SendResult | None = None, error: Exception | None = None) -> None:
+        self.calls = 0
+        self.result = result or SendResult()
+        self.error = error
+        self.seen: list[tuple[object, object, asyncio.Event | None]] = []
+
+    async def __call__(
+        self,
+        session_factory: Any,
+        sender: Any,
+        *,
+        batch: int,
+        stop: asyncio.Event | None = None,
+    ) -> SendResult:
+        self.calls += 1
+        self.seen.append((session_factory, sender, stop))
+        await asyncio.sleep(0)  # как настоящий проход: отдаёт управление циклу событий
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
+async def test_notification_loop_sends_repeatedly_and_stops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = SendScript()
+    sender: Any = object()
+    monkeypatch.setattr(worker, "send_due", script)
+    stop = asyncio.Event()
+    task = asyncio.ensure_future(worker.run_notification_sender(stop, sender, interval=0.01))
+
+    for _ in range(300):
+        if script.calls >= 3:
+            break
+        await asyncio.sleep(0.01)
+    assert not task.done()
+    stop.set()
+    await asyncio.wait_for(task, TIMEOUT)
+
+    assert script.calls >= 3
+    assert script.seen[0] == (SESSION_FACTORY, sender, stop)
+
+
+async def test_notification_loop_exits_at_once_when_stopped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = SendScript()
+    monkeypatch.setattr(worker, "send_due", script)
+    stop = asyncio.Event()
+    stop.set()
+    sender: Any = object()
+
+    await asyncio.wait_for(worker.run_notification_sender(stop, sender), TIMEOUT)
+
+    assert script.calls == 0
+
+
+async def test_notification_loop_continues_at_once_after_a_full_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = SendScript(result=SendResult(sent=worker.NOTIFICATION_BATCH))
+    monkeypatch.setattr(worker, "send_due", script)
+    stop = asyncio.Event()
+    sender: Any = object()
+    task = asyncio.ensure_future(worker.run_notification_sender(stop, sender, interval=60))
+
+    for _ in range(300):
+        if script.calls >= 3:
+            break
+        await asyncio.sleep(0.001)
+    stop.set()
+    await asyncio.wait_for(task, TIMEOUT)
+
+    assert script.calls >= 3  # пауза в 60 с не наступила: очередь не пуста
+
+
+async def test_notification_loop_survives_errors_without_leaking_details(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    script = SendScript(error=ConnectionRefusedError("secret-detail"))
+    monkeypatch.setattr(worker, "send_due", script)
+    caplog.set_level(logging.ERROR)
+    stop = asyncio.Event()
+    sender: Any = object()
+    task = asyncio.ensure_future(worker.run_notification_sender(stop, sender, interval=0.01))
+
+    for _ in range(300):
+        if script.calls >= 3:
+            break
+        await asyncio.sleep(0.01)
+    assert not task.done()
+    stop.set()
+    await asyncio.wait_for(task, TIMEOUT)
+
+    assert script.calls >= 3
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert errors
+    assert all("secret-detail" not in r.getMessage() for r in errors)
+    assert all("ConnectionRefusedError" in r.getMessage() for r in errors)

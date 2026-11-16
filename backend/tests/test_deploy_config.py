@@ -95,6 +95,29 @@ def test_log_level_and_worker_metrics_port_reach_container_environment(
         assert "WORKER_METRICS_PORT" not in environment
 
 
+@pytest.mark.parametrize(
+    ("path", "url", "secret"),
+    [
+        (DEV_COMPOSE, "${TELEGRAM_RELAY_URL:-}", "${TELEGRAM_RELAY_SECRET:-}"),
+        (PROD_COMPOSE, "${TELEGRAM_RELAY_URL}", "${TELEGRAM_RELAY_SECRET}"),
+    ],
+    ids=["dev", "prod"],
+)
+@pytest.mark.parametrize("service", ["bot", "worker"])
+def test_bot_and_worker_get_relay_settings_and_bot_credentials(
+    path: Path, url: str, secret: str, service: str
+) -> None:
+    compose: dict[str, Any] = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+    environment = compose["services"][service]["environment"]
+
+    # воркер шлёт уведомления через тот же relay, что и бот; значения только из окружения
+    assert environment["TELEGRAM_RELAY_URL"] == url
+    assert environment["TELEGRAM_RELAY_SECRET"] == secret
+    assert str(environment["BOT_TOKEN"]).startswith("${BOT_TOKEN")
+    assert str(environment["BOT_USERNAME"]).startswith("${BOT_USERNAME")
+
+
 # ---------------------------------------------------------------- Dockerfile, образы, пакеты
 
 

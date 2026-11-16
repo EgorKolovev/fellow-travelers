@@ -3,7 +3,8 @@
 Идентификаторов и значений из пути (invite-код, uuid) в лейблах нет: `route` — шаблон маршрута,
 `method` — из списка стандартных методов, `status` — число, остальные лейблы — значения
 закрытых `StrEnum` (триггер и вид размещения ниже, `AuditReason`, `JobKind`, `JobOutcome`,
-`JobStatus`, `FlightPollOutcome`). Иначе число рядов росло бы без границы.
+`JobStatus`, `FlightPollOutcome`, `NotificationKind`, `NotificationOutcome`). Иначе число рядов
+росло бы без границы.
 
 Счётчики подбора и воркера обновляются после commit (см. `app.observability.deferred`), поэтому
 откатившийся сценарий их не меняет.
@@ -95,6 +96,22 @@ flight_polls_total = Counter(
     "ft_flight_polls_total",
     "Опросы рейсов у поставщика по исходу",
     ["outcome"],
+)
+
+
+class NotificationOutcome(StrEnum):
+    """Чем кончилась попытка отправить уведомление."""
+
+    SENT = "sent"
+    SKIPPED = "skipped"
+    RETRIED = "retried"
+    FAILED = "failed"
+
+
+notifications_total = Counter(
+    "ft_notifications_total",
+    "Попытки отправить уведомление в Telegram по виду (NotificationKind) и исходу",
+    ["kind", "outcome"],
 )
 worker_queue_depth = Gauge(
     "ft_worker_queue_depth",

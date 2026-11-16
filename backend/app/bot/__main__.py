@@ -1,13 +1,13 @@
 import asyncio
 import logging
 
-from aiogram import Bot, Dispatcher
+from aiogram import Dispatcher
 from aiogram.exceptions import TelegramAPIError
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import MenuButtonDefault
 
 from app.bot.handlers import router
-from app.bot.session import RelaySession
+from app.bot.session import build_bot
 from app.config import get_settings
 from app.db import dispose_engine
 from app.observability.logging import configure_logging
@@ -15,14 +15,7 @@ from app.observability.logging import configure_logging
 
 async def main() -> None:
     settings = get_settings()
-    session = (
-        RelaySession(
-            str(settings.telegram_relay_url), settings.telegram_relay_secret.get_secret_value()
-        )
-        if settings.telegram_relay_url
-        else None
-    )
-    bot = Bot(token=settings.bot_token.get_secret_value(), session=session)
+    bot = build_bot(settings)
     # MemoryStorage: запомненный join_-код теряется при перезапуске бота (допустимо для pre-MVP)
     dispatcher = Dispatcher(storage=MemoryStorage())
     dispatcher.include_router(router)

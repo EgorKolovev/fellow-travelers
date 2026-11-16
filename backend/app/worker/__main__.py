@@ -4,11 +4,14 @@ import signal
 
 from prometheus_client import start_http_server
 
+from app.bot.session import build_bot
 from app.config import get_settings
 from app.db import dispose_engine
 from app.flights import build_provider
 from app.observability.logging import configure_logging
-from app.worker import run, run_flight_polling
+from app.services.notification_sender import TelegramSender
+from app.worker import run, run_flight_polling, run_notification_sender
+from app.worker.retention import run_retention
 
 logger = logging.getLogger("app.worker")
 
@@ -30,14 +33,21 @@ async def main() -> None:
     # метрики отдаёт отдельный поток; порт не публикуется наружу, его читают из сети compose
     metrics_server, _ = start_http_server(settings.worker_metrics_port)
     logger.info("Воркер запущен, метрики на порту %d", settings.worker_metrics_port)
+    bot = build_bot(settings)
     try:
         provider = build_provider(settings)
+        loops = [run(stop), run_notification_sender(stop, TelegramSender(bot))]
         if provider is None:
             logger.info("Поставщик рейсов не настроен: опрос рейсов не запускается")
-            await run(stop)
         else:
-            await asyncio.gather(run(stop), run_flight_polling(stop, provider))
+            loops.append(run_flight_polling(stop, provider))
+        if settings.retention_enabled:
+            loops.append(run_retention(stop))
+        else:
+            logger.info("Удаление данных выключено")
+        await asyncio.gather(*loops)
     finally:
+        await bot.session.close()
         metrics_server.shutdown()
         await dispose_engine()
         logger.info("Воркер остановлен")

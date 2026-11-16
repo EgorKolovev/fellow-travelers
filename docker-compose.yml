@@ -78,6 +78,10 @@ services:
 
   worker:
     <<: *backend
+    environment:
+      <<: *backend-env
+      TELEGRAM_RELAY_URL: ${TELEGRAM_RELAY_URL:-}
+      TELEGRAM_RELAY_SECRET: ${TELEGRAM_RELAY_SECRET:-}
     command: ["python", "-m", "app.worker"]
     depends_on:
       db:

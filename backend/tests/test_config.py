@@ -94,3 +94,17 @@ def test_flight_provider_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FLIGHT_PROVIDER", "fake")
 
     assert make_settings(monkeypatch, "my_bot1").flight_provider == "fake"
+
+
+def test_retention_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("RETENTION_ENABLED", raising=False)
+    monkeypatch.setenv("BOT_USERNAME", "my_bot1")
+
+    assert Settings(_env_file=None).retention_enabled is False
+
+
+def test_retention_enabled_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RETENTION_ENABLED", "true")
+    monkeypatch.setenv("BOT_USERNAME", "my_bot1")
+
+    assert Settings(_env_file=None).retention_enabled is True

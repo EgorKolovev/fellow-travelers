@@ -10,11 +10,14 @@ from app.flights.provider import FlightProvider
 from app.observability import metrics
 from app.services.flight_polling import poll_due_trips
 from app.services.jobs import observe_queue, process_next
+from app.services.notification_sender import NotificationSender, send_due
 
 logger = logging.getLogger(__name__)
 
 POLL_INTERVAL_SECONDS = 2.0
 FLIGHT_POLL_INTERVAL_SECONDS = 30.0
+NOTIFICATION_INTERVAL_SECONDS = 5.0
+NOTIFICATION_BATCH = 20
 
 
 async def run(stop: asyncio.Event, *, poll_interval: float = POLL_INTERVAL_SECONDS) -> None:
@@ -57,5 +60,33 @@ async def run_flight_polling(
             await poll_due_trips(session_factory, provider, stop=stop)
         except Exception:
             logger.exception("Ошибка цикла опроса рейсов, повтор после паузы")
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+
+
+async def run_notification_sender(
+    stop: asyncio.Event,
+    sender: NotificationSender,
+    *,
+    interval: float = NOTIFICATION_INTERVAL_SECONDS,
+) -> None:
+    """Отправляет уведомления из `notifications` раз в `interval` секунд, пока `stop` не выставлен.
+
+    Полный проход (взяли `NOTIFICATION_BATCH` строк) повторяется сразу, неполный — после паузы.
+    Проход, начатый до остановки, дозавершает текущую отправку и не берёт следующие. Ошибка
+    прохода пишется в лог (без текста сообщений), цикл продолжается после паузы.
+    """
+    session_factory = get_session_factory()
+    while not stop.is_set():
+        taken = 0
+        try:
+            result = await send_due(session_factory, sender, batch=NOTIFICATION_BATCH, stop=stop)
+            taken = result.sent + result.skipped + result.retried + result.failed
+        except Exception as exc:
+            logger.error(
+                "Ошибка цикла отправки уведомлений (%s), повтор после паузы", type(exc).__name__
+            )
+        if taken >= NOTIFICATION_BATCH:
+            continue
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(stop.wait(), timeout=interval)

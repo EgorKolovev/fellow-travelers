@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     web_app_url: str | None = None
     # поставщик рейсов: none — не настроен (поиск отвечает 503), fake — тестовый, в памяти
     flight_provider: Literal["none", "fake"] = "none"
+    # необратимое удаление данных групп через 7 суток после окончания (Д11); по умолчанию выключено
+    retention_enabled: bool = False
 
     @field_validator("bot_username")
     @classmethod
