@@ -7,8 +7,9 @@ from app.api.deps import CurrentUser, SessionDep
 from app.models import ApplicationStatus
 from app.schemas.admin import AdminParticipant, AdminParticipants
 from app.schemas.history import HistoryPage
-from app.schemas.transfer import Transfer
+from app.schemas.transfer import Transfer, TransferMembersInput
 from app.services import admin as admin_service
+from app.services import admin_transfers as admin_transfers_service
 from app.services import history as history_service
 from app.services.access import get_event_for_admin
 
@@ -41,6 +42,32 @@ async def list_transfers(
     event = await get_event_for_admin(session, event_id, user)
     transfers = await admin_service.list_transfers(session, event.id)
     return [Transfer.build(t, viewer_id=None) for t in transfers]
+
+
+@router.post("/transfers", status_code=201)
+async def create_transfer(
+    event_id: uuid.UUID, data: TransferMembersInput, user: CurrentUser, session: SessionDep
+) -> Transfer:
+    event = await get_event_for_admin(session, event_id, user)
+    transfer = await admin_transfers_service.create_transfer(
+        session, event, user, data.application_ids
+    )
+    return Transfer.build(transfer, viewer_id=None)
+
+
+@router.put("/transfers/{transfer_id}/members")
+async def set_transfer_members(
+    event_id: uuid.UUID,
+    transfer_id: uuid.UUID,
+    data: TransferMembersInput,
+    user: CurrentUser,
+    session: SessionDep,
+) -> Transfer:
+    event = await get_event_for_admin(session, event_id, user)
+    transfer = await admin_transfers_service.set_transfer_members(
+        session, event, user, transfer_id, data.application_ids
+    )
+    return Transfer.build(transfer, viewer_id=None)
 
 
 @router.get("/history")
