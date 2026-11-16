@@ -9,7 +9,8 @@ _BOT_USERNAME = re.compile(r"[A-Za-z0-9_]{5,32}")
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # hide_input_in_errors: ошибка конфигурации не печатает значения (токен, строку подключения)
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
 
     database_url: str
     bot_token: SecretStr

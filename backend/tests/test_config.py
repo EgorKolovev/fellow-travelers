@@ -174,3 +174,16 @@ def test_aerodatabox_key_is_secret_and_error_does_not_leak_it(
 def test_aerodatabox_unknown_gateway_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(ValidationError, match="aerodatabox_gateway"):
         make_flight_settings(monkeypatch, AERODATABOX_GATEWAY="other")
+
+
+def test_config_error_does_not_print_setting_values(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BOT_TOKEN", "123:token-value-must-not-leak")
+    monkeypatch.setenv("BOT_USERNAME", "my_bot1")
+    monkeypatch.setenv("FLIGHT_PROVIDER", "aerodatabox")
+    monkeypatch.delenv("AERODATABOX_API_KEY", raising=False)
+    with pytest.raises(ValidationError) as error:
+        Settings(_env_file=None)
+    text = str(error.value)
+    assert "token-value-must-not-leak" not in text
+    assert "u:p@localhost" not in text
+    assert "input_value" not in text
