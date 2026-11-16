@@ -96,6 +96,27 @@ UPDATE background_jobs SET status = 'pending', attempts = 0, run_after = now() W
 Счётчики растут только после commit: откатившийся пересчёт их не меняет. Healthcheck сервиса
 (`python -m app.worker.healthcheck`) успешен, если последний опрос очереди был не больше 60 секунд назад.
 
+Кроме заданий, воркер ведёт ещё три цикла (MVP):
+
+- **Опрос рейсов поставщика** раз в 30 секунд, если `FLIGHT_PROVIDER` не `none`. Опрашиваются только рейсы с
+  активными заявками; расписание — Д2 в `docs/spec-mvp.md`. Изменения пишутся в историю от `system` и ставят
+  пересчёт трансферов. Сейчас доступны `none` (по умолчанию: поиск рейсов отвечает 503) и `fake` (тестовый
+  поставщик в памяти, только для разработки).
+- **Отправка уведомлений** через бота раз в 5 секунд. Строки `notifications` создаются при commit изменений;
+  воркер отправляет их и ставит `sent`, `skipped` (пользователь не писал боту или заблокировал его) или,
+  после 8 неудач, `failed`. Воркеру нужны `BOT_TOKEN`, `BOT_USERNAME` и, если ВМ не видит Telegram,
+  `TELEGRAM_RELAY_URL` и `TELEGRAM_RELAY_SECRET` (`docs/telegram-relay.md`). Метрика —
+  `ft_notifications_total{kind,outcome}`.
+- **Удаление данных** раз в час, только при `RETENTION_ENABLED=true`. Группа удаляется целиком через 7 суток
+  после позднего из «конец дня `ends_on`» и последней отметки «Уехал». Удаление необратимо; пользователи
+  остаются.
+
+```sql
+SELECT status, count(*) FROM notifications GROUP BY status;
+SELECT id, kind, attempts, last_error FROM notifications WHERE status = 'failed' ORDER BY id DESC LIMIT 20;
+UPDATE notifications SET status = 'pending', attempts = 0, run_after = now() WHERE id = ...;
+```
+
 Остановка по SIGTERM или Ctrl+C: текущее задание доводится до конца, затем процесс выходит. Несколько
 экземпляров воркера безопасны: задания делятся через `FOR UPDATE SKIP LOCKED`, а изменения одной группы
 сериализует advisory-блокировка.
@@ -116,9 +137,28 @@ UPDATE background_jobs SET status = 'pending', attempts = 0, run_after = now() W
 **до** revert, пока на ВМ работает новый образ.
 
 1. Сохранить дамп: `sudo docker exec db pg_dump -U fellow -d fellow_travelers | gzip > ~/pre-rollback.sql.gz`.
-2. Откатить схему новым образом до ревизии старого релиза (для релиза с историей и воркером — `0002`):
-   `sudo docker exec api alembic downgrade 0002`. Таблицы `audit_log` и `background_jobs` удаляются вместе
-   с данными: история с момента обновления пропадёт, она остаётся только в дампе.
+2. Откатить схему новым образом до ревизии старого релиза:
+   - релиз MVP → релиз с историей и воркером: `0004`. Сначала убрать записи истории с причинами MVP: старый
+     код их не знает, а миграция `0005` не вернёт старое ограничение, пока они есть. Таблица истории
+     защищена триггером «только добавление», поэтому на время удаления он отключается:
+
+     ```bash
+     sudo docker exec -i db psql -U fellow -d fellow_travelers <<'SQL'
+     BEGIN;
+     ALTER TABLE audit_log DISABLE TRIGGER audit_log_append_only;
+     DELETE FROM audit_log WHERE reason IN
+       ('application_changed', 'departure_undone', 'flight_cancelled', 'provider_update');
+     ALTER TABLE audit_log ENABLE TRIGGER audit_log_append_only;
+     COMMIT;
+     SQL
+     sudo docker exec api alembic downgrade 0004
+     ```
+
+     Удаляются таблица `notifications` (неотправленные уведомления пропадут), поля опроса рейсов и
+     `applications.departed_from_transfer_id`. Заявки, трансферы и рейсы остаются.
+   - релиз с историей и воркером → pre-MVP: `sudo docker exec api alembic downgrade 0002`. Таблицы
+     `audit_log` и `background_jobs` удаляются вместе с данными: история с момента обновления пропадёт, она
+     остаётся только в дампе.
 3. Сделать revert слияния в `main` и запушить: деплой соберёт и поставит старые образы.
 4. Проверить: `curl -s -o /dev/null -w '%{http_code}' https://<сайт>/api/v1/me` даёт 401, а не 502.
 
