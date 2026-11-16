@@ -193,3 +193,19 @@ async def test_unknown_enum_value_is_rejected(
                 ),
                 {"event_id": event.id, **values},
             )
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        AuditReason.APPLICATION_CHANGED,
+        AuditReason.DEPARTURE_UNDONE,
+        AuditReason.FLIGHT_CANCELLED,
+        AuditReason.PROVIDER_UPDATE,
+    ],
+)
+async def test_mvp_reasons_are_stored(db_session: AsyncSession, reason: AuditReason) -> None:
+    entry = await make_audit_log(db_session, reason=reason)
+
+    stored = await _fresh(db_session, entry.id)
+    assert stored.reason == reason
