@@ -2,7 +2,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.models import Application as ApplicationModel
 from app.models import Transfer as TransferModel
@@ -14,7 +14,7 @@ from app.timezones import to_local
 class TransferMembersInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    application_ids: list[uuid.UUID]
+    application_ids: list[uuid.UUID] = Field(max_length=10)
 
 
 class TransferMember(BaseModel):

@@ -711,3 +711,59 @@ async def test_put_cancelled_flight_is_409_incompatible(
     assert await error_of(response) == (409, "INCOMPATIBLE_TRANSFER")
     assert "отменён" in response.json()["error"]["message"]
     await assert_nothing_changed(db_session, event, before, history_len)
+
+
+async def test_put_departed_companion_counts_in_capacity(
+    api_client: AsyncClient, db_session: AsyncSession, event: Event
+) -> None:
+    """Уехавший со спутником занимает 2 места: A(2) + B + C = 4 пассажира."""
+    t = await auto_transfer(db_session, event)
+    a = await app_at(db_session, event, 0, transfer=t, departed_at=BASE, with_companion=True)
+    b = await app_at(db_session, event, 5, transfer=t)
+    c = await app_at(db_session, event, 8)
+
+    response = await put_members(api_client, event.id, t.id, [a.id, b.id, c.id])
+
+    assert await error_of(response) == (409, "CAPACITY_EXCEEDED")
+    assert await state(db_session, c) == (S.SEARCHING, None)
+
+
+async def test_put_departed_single_passenger_fits_three(
+    api_client: AsyncClient, db_session: AsyncSession, event: Event
+) -> None:
+    t = await auto_transfer(db_session, event)
+    a = await app_at(db_session, event, 0, transfer=t, departed_at=BASE)
+    b = await app_at(db_session, event, 5, transfer=t)
+    c = await app_at(db_session, event, 8)
+
+    response = await put_members(api_client, event.id, t.id, [a.id, b.id, c.id])
+
+    assert response.status_code == 200
+    assert member_ids(response) == {str(a.id), str(b.id), str(c.id)}
+    assert sum(m["passengers"] for m in response.json()["members"]) == 3
+
+
+async def test_put_departed_baggage_counts_in_capacity(
+    api_client: AsyncClient, db_session: AsyncSession, event: Event
+) -> None:
+    t = await auto_transfer(db_session, event)
+    a = await app_at(db_session, event, 0, transfer=t, departed_at=BASE, baggage_count=2)
+    b = await app_at(db_session, event, 5, transfer=t)
+    c = await app_at(db_session, event, 8, baggage_count=1)
+
+    response = await put_members(api_client, event.id, t.id, [a.id, b.id, c.id])
+
+    assert await error_of(response) == (409, "CAPACITY_EXCEEDED")
+
+
+async def test_put_eleven_ids_is_422(
+    api_client: AsyncClient, db_session: AsyncSession, event: Event
+) -> None:
+    t = await auto_transfer(db_session, event)
+    await app_at(db_session, event, 0, transfer=t)
+    await app_at(db_session, event, 5, transfer=t)
+
+    response = await put_members(api_client, event.id, t.id, [uuid.uuid4() for _ in range(11)])
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"

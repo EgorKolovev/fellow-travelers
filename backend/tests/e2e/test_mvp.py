@@ -466,15 +466,7 @@ async def test_step4_participant_edits_assigned_application(
     ]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Д5/критерий 2: после выхода заявки из трансфера сервис сначала заполняет места из "
-        "всех ждущих заявок, включая только что вышедшую, поэтому вышедшая заявка (со спутником) "
-        "и ждущая собираются в новый трансфер, а место в прежнем трансфере остаётся свободным"
-    ),
-)
-async def test_step4_known_issue_edited_application_competes_for_freed_seat(
+async def test_step4_edited_application_does_not_take_freed_seat_from_waiting(
     api_client: AsyncClient, db_session: AsyncSession
 ) -> None:
     c, s = api_client, db_session

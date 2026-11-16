@@ -29,29 +29,49 @@ class MatchCandidate:
             raise ValueError("max_wait must not be negative")
 
 
+def fits_capacity(group: Sequence[MatchCandidate]) -> bool:
+    """Помещаются ли пассажиры и багаж группы в машину (не больше 3 человек и 2 мест багажа)."""
+    return (
+        sum(c.passengers for c in group) <= MAX_PASSENGERS
+        and sum(c.baggage for c in group) <= MAX_BAGGAGE
+    )
+
+
+def fits_waits(group: Sequence[MatchCandidate]) -> bool:
+    """Один аэропорт прилёта и ожидание каждого в пределах его `max_wait` (пустая группа — да)."""
+    if len({c.arrival_location_id for c in group}) > 1:
+        return False
+    if not group:
+        return True
+    # все ждут самого позднего прилетающего, каждый — в пределах своего ожидания
+    latest = max(c.arrival_at for c in group)
+    return all(latest - c.arrival_at <= c.max_wait for c in group)
+
+
 def is_compatible(group: Sequence[MatchCandidate]) -> bool:
     """Можно ли посадить всю группу в одну машину (минимум заявок не проверяется)."""
     if not group:
         return False
     if len({c.id for c in group}) != len(group):
         return False
-    if len({c.arrival_location_id for c in group}) != 1:
-        return False
-    if sum(c.passengers for c in group) > MAX_PASSENGERS:
-        return False
-    if sum(c.baggage for c in group) > MAX_BAGGAGE:
-        return False
-    # все ждут самого позднего прилетающего, каждый — в пределах своего ожидания
-    latest = max(c.arrival_at for c in group)
-    return all(latest - c.arrival_at <= c.max_wait for c in group)
+    return fits_capacity(group) and fits_waits(group)
 
 
-def fits_transfer(candidate: MatchCandidate, others: Sequence[MatchCandidate]) -> bool:
-    """Остаётся ли заявка в трансфере с новыми данными: она и остальные участники совместимы.
+def fits_transfer(
+    candidate: MatchCandidate,
+    waiting_others: Sequence[MatchCandidate],
+    departed_others: Sequence[MatchCandidate] = (),
+) -> bool:
+    """Остаётся ли заявка в трансфере с новыми данными (Д5).
 
-    `others` — остальные заявки трансфера без самого `candidate`.
+    `waiting_others` — остальные ещё не уехавшие участники, `departed_others` — уехавшие. Места и
+    багаж считаются по всем: уехавший машину не освободил. Аэропорт и ожидание — только по тем,
+    кто ещё не уехал.
     """
-    return is_compatible((candidate, *others))
+    everyone = (candidate, *waiting_others, *departed_others)
+    if len({c.id for c in everyone}) != len(everyone):
+        return False
+    return fits_capacity(everyone) and fits_waits((candidate, *waiting_others))
 
 
 def _sort_key(c: MatchCandidate) -> tuple[datetime, UUID]:

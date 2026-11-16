@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import AppError, ErrorCode
-from app.matching import MAX_BAGGAGE, MAX_PASSENGERS, is_compatible
+from app.matching import fits_capacity, fits_waits
 from app.models import (
     ActorKind,
     Application,
@@ -77,15 +77,15 @@ def _check_applications(
             raise _invalid("В трансфер нельзя поставить заявку «Еду сам» или отменённую")
 
 
-def _check_composition(waiting: Sequence[tuple[Application, Trip]]) -> None:
-    """409: вместимость, затем совместимость по аэропорту и ожиданию (уехавшие не считаются)."""
-    if not waiting:
+def _check_composition(members: Sequence[tuple[Application, Trip]]) -> None:
+    """409: вместимость по всем заявкам состава (включая уехавших), затем аэропорт и ожидание.
+
+    Аэропорт, ожидание и отменённый рейс проверяются только у тех, кто ещё не уехал.
+    """
+    if not members:
         return
-    candidates = [_candidate(application, trip) for application, trip in waiting]
-    if (
-        sum(c.passengers for c in candidates) > MAX_PASSENGERS
-        or sum(c.baggage for c in candidates) > MAX_BAGGAGE
-    ):
+    waiting = [(a, t) for a, t in members if a.departed_at is None]
+    if not fits_capacity([_candidate(a, t) for a, t in members]):
         raise AppError(
             ErrorCode.CAPACITY_EXCEEDED,
             "В машину не помещаются все пассажиры и багаж: не больше 3 человек и 2 мест багажа",
@@ -97,7 +97,7 @@ def _check_composition(waiting: Sequence[tuple[Application, Trip]]) -> None:
             "Рейс одной из заявок отменён: такую заявку нельзя поставить в трансфер",
             409,
         )
-    if not is_compatible(candidates):
+    if not fits_waits([_candidate(a, t) for a, t in waiting]):
         raise AppError(
             ErrorCode.INCOMPATIBLE_TRANSFER,
             "Заявки не подходят друг другу: разные аэропорты или время ожидания не сходится",
@@ -174,8 +174,8 @@ async def set_transfer_members(
     """Задаёт состав трансфера целиком (CAP-11); пустой список расформировывает его.
 
     Все проверки до первого изменения; commit в конце. Уехавшие заявки, уже стоящие в этом
-    трансфере, можно оставить в списке, но нельзя убрать; в вместимости и ожидании они не
-    участвуют (как в `reconcile_event`).
+    трансфере, можно оставить в списке, но нельзя убрать; места и багаж считаются и по ним, а
+    аэропорт и ожидание — только по ждущим (как в `reconcile_event`).
     """
     ids = list(application_ids)
     _check_list(ids, min_size=0)
@@ -209,7 +209,7 @@ async def set_transfer_members(
         raise _already_departed()
     if any(found[i][0].departed_at is not None and i not in current_ids for i in ids):
         raise _already_departed()
-    _check_composition([found[i] for i in ids if found[i][0].departed_at is None])
+    _check_composition([found[i] for i in ids])
 
     actor = _admin(user)
     transfer.origin = TransferOrigin.ADMIN

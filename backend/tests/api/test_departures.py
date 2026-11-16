@@ -12,7 +12,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import (
     Application,
     ApplicationStatus,
+    BackgroundJob,
     Event,
+    JobKind,
     Transfer,
     TransferStatus,
     User,
@@ -487,3 +489,81 @@ async def test_participant_departed_remembers_transfer(
 
     assert response.status_code == 200
     assert (await row(db_session, first)).departed_from_transfer_id == transfer.id
+
+
+async def test_undo_for_row_before_migration_returns_to_departed_transfer(
+    api_client: AsyncClient, db_session: AsyncSession, event: Event
+) -> None:
+    """Строка до миграции 0007: `departed_from_transfer_id` пуст, но заявка в трансфере."""
+    transfer, first, second = await pair(db_session, event)
+    await admin_transfer_departed(api_client, event.id, transfer.id)
+    assert await transfer_status(db_session, transfer.id) == TransferStatus.DEPARTED
+    await db_session.execute(
+        update(Application)
+        .where(Application.id == second.id)
+        .values(departed_from_transfer_id=None, departed_at=datetime.now(UTC))
+    )
+    await db_session.flush()
+
+    response = await put_marks(api_client, event.id, second, db_session, {"departed": False})
+
+    assert response.status_code == 200
+    assert (response.json()["status"], response.json()["transfer_id"]) == (
+        "assigned",
+        str(transfer.id),
+    )
+    assert await transfer_status(db_session, transfer.id) == TransferStatus.ACTIVE
+    assert (await row(db_session, first)).departed_at is not None
+
+
+async def test_marks_changed_records_carry_transfer_id(
+    api_client: AsyncClient, db_session: AsyncSession, event: Event
+) -> None:
+    transfer, first, _ = await pair(db_session, event)
+    await put_marks(api_client, event.id, first, db_session, {"departed": True})
+    await put_marks(api_client, event.id, first, db_session, {"departed": False})
+
+    rows = [r for r in await audit_rows(db_session, event.id) if r.action == "marks_changed"]
+
+    assert [(r.details["departed"], r.transfer_id) for r in rows] == [
+        (True, transfer.id),
+        (False, transfer.id),
+    ]
+
+
+async def test_undo_back_into_transfer_enqueues_reconcile(
+    api_client: AsyncClient, db_session: AsyncSession, event: Event
+) -> None:
+    """Пока заявка «уехала», рейс могли сдвинуть: после возврата в трансфер ставится пересчёт."""
+    _, first, _ = await pair(db_session, event)
+    await admin_app_departed(api_client, event.id, first.id)
+    assert await pending_jobs(db_session, event) == []
+
+    await put_marks(api_client, event.id, first, db_session, {"departed": False})
+
+    jobs = await pending_jobs(db_session, event)
+    assert [(job.kind, job.trip_id) for job in jobs] == [(JobKind.RECONCILE_TRIP, first.trip_id)]
+
+
+async def test_undo_into_new_search_does_not_enqueue_reconcile(
+    api_client: AsyncClient, db_session: AsyncSession, event: Event
+) -> None:
+    _, first, second = await pair(db_session, event)
+    await admin_app_departed(api_client, event.id, first.id)
+    await cancel(api_client, event.id, second, db_session)
+
+    await put_marks(api_client, event.id, first, db_session, {"departed": False})
+
+    assert await pending_jobs(db_session, event) == []
+
+
+async def pending_jobs(session: AsyncSession, event: Event) -> list[BackgroundJob]:
+    return list(
+        (
+            await session.scalars(
+                select(BackgroundJob)
+                .where(BackgroundJob.event_id == event.id)
+                .execution_options(populate_existing=True)
+            )
+        ).all()
+    )

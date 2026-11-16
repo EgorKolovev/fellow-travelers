@@ -1,5 +1,5 @@
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
@@ -23,6 +23,7 @@ from app.observability.metrics import MatchTrigger
 from app.schemas.application import ApplicationInput, MarksInput
 from app.services.access import is_member
 from app.services.audit import Actor, record
+from app.services.jobs import enqueue_reconcile
 from app.services.matching import (
     all_departed,
     fill_event,
@@ -240,7 +241,12 @@ async def upsert_my_application(
             details={"changed_fields": changed_fields, "status": application.status.value},
         )
     if leave_reason is not None:
-        # освободившееся место и оставшихся пристраивает общий проход; затем сама заявка
+        # освободившееся место и оставшихся пристраивает общий проход без самой заявки: она
+        # не должна занять «чужое» место раньше ждущих (Д5); затем она ищет сама
+        await fill_event(session, event.id, trigger=MatchTrigger.LEAVE, skip=application.id)
+    elif check_fit and changed_fields:
+        # заявка осталась в трансфере, а её поля изменились: освободившееся место (спутник,
+        # багаж) занимает ждущая заявка; ручные трансферы `fill_event` не дополняет
         await fill_event(session, event.id, trigger=MatchTrigger.LEAVE)
     if application.status == ApplicationStatus.SEARCHING:
         await match_application(session, application, trigger=MatchTrigger.APPLICATION)
@@ -336,6 +342,7 @@ async def mark_departed(
         actor=actor,
         reason=reason,
         application=application,
+        transfer_id=transfer_id,
         details={"at_meeting_point": application.at_meeting_point, "departed": True},
     )
     await session.flush()
@@ -344,10 +351,15 @@ async def mark_departed(
 
 
 async def _undo_departure(session: AsyncSession, application: Application, actor: Actor) -> None:
-    """Отмена «Уехал» по Д7: назад в трансфер, если он есть, иначе в поиск; без commit."""
+    """Отмена «Уехал» по Д7: назад в трансфер, если заявка в нём, иначе в поиск; без commit.
+
+    Ветвится по тому, где заявка сейчас, а не по `departed_from_transfer_id`: у строк до миграции
+    0007 он пуст, хотя заявка осталась в трансфере.
+    """
     from_transfer_id = application.departed_from_transfer_id
     application.departed_at = None
     application.departed_from_transfer_id = None
+    transfer_id = application.transfer_id
     record(
         session,
         event_id=application.event_id,
@@ -355,21 +367,20 @@ async def _undo_departure(session: AsyncSession, application: Application, actor
         actor=actor,
         reason=AuditReason.DEPARTURE_UNDONE,
         application=application,
+        transfer_id=transfer_id,
         details={"at_meeting_point": application.at_meeting_point, "departed": False},
     )
-    transfer_id = application.transfer_id
-    if from_transfer_id is None:
-        # уезжал не из трансфера: статус прежний, поиск продолжается, если он был
-        needs_match = application.status == ApplicationStatus.SEARCHING
-    elif transfer_id is not None:
+    needs_match = False
+    if transfer_id is not None:
         # заявка осталась в трансфере: он снова активен, если из-за неё считался уехавшим
         await session.execute(
             update(Transfer)
             .where(Transfer.id == transfer_id, Transfer.status == TransferStatus.DEPARTED)
             .values(status=TransferStatus.ACTIVE)
         )
-        needs_match = False
-    else:
+        # пока заявка была «уехавшей», её рейс могли отменить или сдвинуть
+        await enqueue_reconcile(session, event_id=application.event_id, trip_id=application.trip_id)
+    elif from_transfer_id is not None:
         # трансфер распался, пока заявка ехала «сама»: снова в поиск
         _change_status(
             session,
@@ -379,9 +390,22 @@ async def _undo_departure(session: AsyncSession, application: Application, actor
             reason=AuditReason.DEPARTURE_UNDONE,
         )
         needs_match = True
+    else:
+        # уезжал не из трансфера: статус прежний, поиск продолжается, если он был
+        needs_match = application.status == ApplicationStatus.SEARCHING
     await session.flush()
     if needs_match:
         await match_application(session, application, trigger=MatchTrigger.APPLICATION)
+
+
+async def _within_undo_window(session: AsyncSession, application: Application) -> bool:
+    """Отмена «Уехал» ещё возможна; окно считает БД: `departed_at` тоже поставлен её `now()`."""
+    within = await session.scalar(
+        select(Application.departed_at > func.now() - UNDO_DEPARTURE_WINDOW).where(
+            Application.id == application.id
+        )
+    )
+    return bool(within)
 
 
 async def set_my_marks(
@@ -396,7 +420,7 @@ async def set_my_marks(
             raise _already_departed()
         if data.departed is True:
             return await _finish(session, event, user)
-        if datetime.now(UTC) - application.departed_at > UNDO_DEPARTURE_WINDOW:
+        if not await _within_undo_window(session, application):
             raise _already_departed()
         await _undo_departure(session, application, _participant(user))
         return await _finish(session, event, user)

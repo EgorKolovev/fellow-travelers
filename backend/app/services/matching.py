@@ -317,7 +317,11 @@ async def match_application(
 
 
 async def fill_event(
-    session: AsyncSession, event_id: uuid.UUID, *, trigger: MatchTrigger
+    session: AsyncSession,
+    event_id: uuid.UUID,
+    *,
+    trigger: MatchTrigger,
+    skip: uuid.UUID | None = None,
 ) -> FillResult:
     """Размещает ждущие заявки группы; только flush, без commit. Вызывать под `lock_event`.
 
@@ -331,8 +335,11 @@ async def fill_event(
 
     `trigger` идёт в метрики: `leave` после выхода из трансфера, `reconcile` в конце пересчёта.
     Они считают только настоящие посадки, без отказов (`_observe_match`).
+
+    `skip` — заявка, которую размещают отдельно после прохода (Д5: изменённая заявка не должна
+    занять место раньше ждущих); среди свободных её нет.
     """
-    pool = await _load_pool(session, event_id)
+    pool = await _load_pool(session, event_id, skip=skip)
     joined = created = 0
     for application_id in list(pool.free):
         entry = pool.free.get(application_id)
@@ -559,7 +566,11 @@ async def leave_transfer(
 
 
 async def fits_current_transfer(session: AsyncSession, application: Application) -> bool:
-    """Подходит ли заявка с новыми данными остальным участникам её трансфера (Д5)."""
+    """Подходит ли заявка с новыми данными остальным участникам её трансфера (Д5).
+
+    Места и багаж считаются по всем участникам, включая уехавших; аэропорт и ожидание — только по
+    ждущим.
+    """
     rows = (
         await session.execute(
             select(Application, Trip)
@@ -580,7 +591,9 @@ async def fits_current_transfer(session: AsyncSession, application: Application)
     if own_trip.status == TripStatus.CANCELLED:
         return False  # Д8
     return fits_transfer(
-        _candidate(application, own_trip), [_candidate(app, trip) for app, trip in rows]
+        _candidate(application, own_trip),
+        [_candidate(app, trip) for app, trip in rows if app.departed_at is None],
+        [_candidate(app, trip) for app, trip in rows if app.departed_at is not None],
     )
 
 
