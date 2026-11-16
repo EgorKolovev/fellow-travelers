@@ -89,3 +89,26 @@ def test_text_has_nothing_but_title_number_and_time() -> None:
         assert "+7999" not in text
         assert "Иван" not in text
         assert "t.me" not in text
+
+
+def test_flight_changed_for_mate_names_the_mate_flight() -> None:
+    mate = {**PAYLOAD, "role": "mate"}
+
+    assert render(
+        NotificationKind.FLIGHT_CHANGED,
+        mate,
+        title=TITLE,
+        trip_number="SU1234",
+        arrival_local=ARRIVAL,
+    ) == ("Рейс попутчика SU1234: новое расчётное прибытие 08:05, 12.11 — «Конференция».")
+    assert render(
+        NotificationKind.FLIGHT_CHANGED, mate, title=TITLE, trip_number=None, arrival_local=None
+    ) == ("Рейс попутчика: расчётное прибытие изменилось — «Конференция».")
+    passenger = {**PAYLOAD, "role": "passenger"}
+    assert render(
+        NotificationKind.FLIGHT_CHANGED,
+        passenger,
+        title=TITLE,
+        trip_number="SU1234",
+        arrival_local=ARRIVAL,
+    ) == _render(NotificationKind.FLIGHT_CHANGED)

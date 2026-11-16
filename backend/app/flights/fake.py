@@ -25,7 +25,9 @@ class FakeFlightProvider:
     запрос всегда даёт тот же рейс. Если рейсы добавляли, `search` отдаёт только подходящие
     по номеру и дате вылета (дата берётся в часовом поясе самого `scheduled_departure`).
 
-    `fetch` отдаёт рейс по `provider_ref`, если он добавлен или раньше выдан поиском.
+    `fetch` отдаёт рейс по `provider_ref`: добавленный через `add`, а в режиме генерации — рейс,
+    восстановленный из `provider_ref` вида `fake:<НОМЕР>:<ГГГГ-ММ-ДД>`. Память не растёт, а другой
+    процесс (воркер) видит рейсы, найденные через API.
 
     `unavailable = True` — оба метода бросают `ProviderUnavailableError`;
     `delay` — секунды ожидания перед ответом (для проверки таймаута).
@@ -60,9 +62,7 @@ class FakeFlightProvider:
         await self._respond()
         normalized = normalize_number(number)
         if not self._added:
-            flight = self._generate(normalized, departure_date)
-            self._flights.setdefault(flight.provider_ref, flight)
-            return [flight]
+            return [self._generate(normalized, departure_date)]
         return [
             flight
             for flight in self._flights.values()
@@ -71,7 +71,23 @@ class FakeFlightProvider:
 
     async def fetch(self, provider_ref: str) -> ProviderFlight | None:
         await self._respond()
+        if not self._added:
+            # воркер — отдельный процесс и не видел поиска в API: рейс восстанавливается из ref
+            return self._restore(provider_ref)
         return self._flights.get(provider_ref)
+
+    @classmethod
+    def _restore(cls, provider_ref: str) -> ProviderFlight | None:
+        prefix, _, rest = provider_ref.partition(":")
+        number, _, raw_date = rest.partition(":")
+        if prefix != "fake" or not number:
+            return None
+        try:
+            departure_date = date.fromisoformat(raw_date)
+        except ValueError:
+            return None
+        flight = cls._generate(number, departure_date)
+        return flight if flight.provider_ref == provider_ref else None
 
     @staticmethod
     def _generate(number: str, departure_date: date) -> ProviderFlight:

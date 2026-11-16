@@ -10,6 +10,7 @@ import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from aiogram.exceptions import (
@@ -253,7 +254,7 @@ async def test_retry_after_postpones_without_attempt(
 
     result = await send_due(sessions, sender, now=NOW)
 
-    assert result == SendResult(retried=1)
+    assert result == SendResult(retried=1, pause_seconds=17.0)
     row = await _load(sessions, nid)
     assert row.status == NotificationStatus.PENDING
     assert row.attempts == 2
@@ -478,3 +479,54 @@ async def test_telegram_sender_sends_text_with_url_button() -> None:
         "Открыть поездку",
         "https://t.me/test_bot?startapp=event_x",
     )
+
+
+async def test_retry_after_stops_the_pass_and_asks_for_a_pause(
+    sessions: async_sessionmaker[AsyncSession], group: Group
+) -> None:
+    ids = [await _add(sessions, group) for _ in range(3)]
+    sender = FakeSender(errors=[None, TelegramRetryAfter(METHOD, "Too Many Requests", 30)])
+
+    result = await send_due(sessions, sender, now=NOW)
+
+    assert result == SendResult(sent=1, retried=1, pause_seconds=30.0)
+    assert len(sender.calls) == 2  # третья отправка не начата
+    assert (await _load(sessions, ids[0])).status == NotificationStatus.SENT
+    postponed = await _load(sessions, ids[1])
+    assert postponed.run_after == NOW + timedelta(seconds=30)
+    untouched = await _load(sessions, ids[2])
+    assert untouched.status == NotificationStatus.PENDING
+    assert untouched.run_after == NOW + LEASE  # вернётся по окончании аренды
+    # после окончания аренды строка уходит обычным порядком
+    again = await send_due(sessions, FakeSender(), now=NOW + LEASE)
+    assert again.sent == 2
+
+
+async def test_store_result_failure_does_not_stop_the_pass(
+    sessions: async_sessionmaker[AsyncSession],
+    group: Group,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    ids = [await _add(sessions, group) for _ in range(3)]
+    original = notification_sender._store_result
+
+    async def flaky(factory: Any, item: Any, *args: Any, **kwargs: Any) -> None:
+        if item.id == ids[0]:
+            raise ConnectionRefusedError("secret-detail")
+        await original(factory, item, *args, **kwargs)
+
+    monkeypatch.setattr(notification_sender, "_store_result", flaky)
+    caplog.set_level(logging.ERROR)
+    sender = FakeSender()
+
+    result = await send_due(sessions, sender, now=NOW)
+
+    assert result == SendResult(sent=2)
+    assert len(sender.calls) == 3
+    assert (await _load(sessions, ids[0])).status == NotificationStatus.PENDING
+    assert (await _load(sessions, ids[2])).status == NotificationStatus.SENT
+    (record,) = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert "ConnectionRefusedError" in record.getMessage()
+    assert "secret-detail" not in record.getMessage()
+    assert record.notification_id == ids[0]  # type: ignore[attr-defined]

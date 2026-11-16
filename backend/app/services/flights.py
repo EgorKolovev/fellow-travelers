@@ -116,6 +116,27 @@ async def apply_update(session: AsyncSession, trip: Trip, flight: ProviderFlight
         "status": flight.status,
     }
     before = {name: getattr(trip, name) for name in _UPDATE_FIELDS}
+    clash = await session.scalar(
+        select(Trip.id).where(
+            Trip.event_id == trip.event_id,
+            Trip.mode == trip.mode,
+            Trip.number == flight.number,
+            Trip.scheduled_departure == flight.scheduled_departure,
+            Trip.id != trip.id,
+        )
+    )
+    if clash is not None:
+        # другой рейс группы уже занимает такие номер и вылет (уникальный ключ): эти два поля
+        # остаются прежними, остальные применяются
+        logger.warning(
+            "Обновление рейса: номер и вылет заняты другим рейсом группы (рейс %s, занят %s)",
+            trip.id,
+            clash,
+        )
+        new_values["number"] = before["number"]
+        new_values["scheduled_departure"] = before["scheduled_departure"]
+        if flight.scheduled_arrival <= trip.scheduled_departure:
+            new_values["scheduled_arrival"] = before["scheduled_arrival"]
     changed_fields = [name for name in _UPDATE_FIELDS if new_values[name] != before[name]]
     if not changed_fields:
         return False
@@ -154,8 +175,12 @@ async def _save(
     flight: ProviderFlight,
     departure: Location,
     arrival: Location,
-) -> Trip:
-    """Рейс поставщика в группе: сохранённый обновляем, ручной усыновляем, иначе создаём."""
+) -> Trip | None:
+    """Рейс поставщика в группе: сохранённый обновляем, ручной усыновляем, иначе создаём.
+
+    Усыновляется только ручной рейс (`provider_ref IS NULL`). Если номер и вылет заняты рейсом
+    с другим `provider_ref`, рейс не сохраняется (`None`): иначе нарушился бы уникальный ключ.
+    """
     existing = await session.scalar(
         select(Trip)
         .where(Trip.event_id == event_id, Trip.provider_ref == flight.provider_ref)
@@ -171,6 +196,7 @@ async def _save(
             Trip.mode == TransportMode.FLIGHT,
             Trip.number == flight.number,
             Trip.scheduled_departure == flight.scheduled_departure,
+            Trip.provider_ref.is_(None),
         )
         .execution_options(populate_existing=True)
     )
@@ -182,6 +208,17 @@ async def _save(
         await session.flush()
         await apply_update(session, manual, flight)
         return manual
+    taken = await session.scalar(
+        select(Trip.id).where(
+            Trip.event_id == event_id,
+            Trip.mode == TransportMode.FLIGHT,
+            Trip.number == flight.number,
+            Trip.scheduled_departure == flight.scheduled_departure,
+        )
+    )
+    if taken is not None:
+        logger.warning("Рейс поставщика пропущен: номер и вылет заняты рейсом %s", taken)
+        return None
     trip = Trip(
         event_id=event_id,
         mode=TransportMode.FLIGHT,
@@ -215,11 +252,15 @@ async def search_flights(
     ответил за `PROVIDER_TIMEOUT_SECONDS` — 503. Рейс с аэропортом вне справочника пропускается.
     """
     event = await get_event_for_member(session, event_id, user)
+    event_pk = event.id
+    # до этого момента были только чтения: отпускаем соединение, пока ждём медленного поставщика
+    await session.commit()
     flights = await _query_provider(provider, normalize_number(number), departure_date)
     airports = await _airports(session, flights)
 
-    await lock_event(session, event.id)
+    await lock_event(session, event_pk)
     saved: list[uuid.UUID] = []
+    seen: set[tuple[str, datetime]] = set()  # один номер и вылет под разными ref: берём первый
     for flight in flights:
         departure = airports.get(flight.departure_iata)
         arrival = airports.get(flight.arrival_iata)
@@ -237,7 +278,13 @@ async def search_flights(
                 flight.arrival_iata,
             )
             continue
-        saved.append((await _save(session, event.id, flight, departure, arrival)).id)
+        key = (flight.number, flight.scheduled_departure)
+        if key in seen:
+            continue
+        seen.add(key)
+        trip = await _save(session, event_pk, flight, departure, arrival)
+        if trip is not None:
+            saved.append(trip.id)
     await session.commit()
 
     stmt = (

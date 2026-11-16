@@ -8,8 +8,13 @@
 2. Для каждой строки вне транзакции собирается текст и идёт запрос в Telegram.
 3. Отдельная короткая транзакция пишет результат. Метрика растёт после commit.
 
-Если проход затянулся и аренда подходит к концу, новые отправки не начинаются: остаток вернётся
-в очередь сам, а сообщение не уйдёт дважды.
+Доставка «как минимум один раз»: если процесс упал или запись статуса не удалась между отправкой
+и записью результата, строка вернётся в очередь по окончании аренды, и сообщение уйдёт повторно.
+Если проход затянулся и аренда подходит к концу (бюджет прохода короче аренды на отправку и
+запас), новые отправки не начинаются: остаток вернётся в очередь сам.
+Ошибка записи результата одной строки не останавливает проход. На `TelegramRetryAfter` проход
+прекращается: остальные арендованные строки вернутся по окончании аренды, а цикл отправки ждёт
+`SendResult.pause_seconds`.
 
 В логах только id уведомления, вид, исход и имя класса ошибки: ни telegram_id, ни имён, ни текста,
 ни токена, ни адреса relay.
@@ -58,6 +63,8 @@ SEND_TIMEOUT_SECONDS = 20.0
 MAX_ATTEMPTS = 8
 BACKOFF_BASE_SECONDS = 30
 BACKOFF_MAX_SECONDS = 3600
+# запас на запись результата и остановку: бюджет прохода = аренда - отправка - запас
+BUDGET_RESERVE_SECONDS = 30.0
 
 
 class NotificationSender(Protocol):
@@ -81,12 +88,17 @@ class TelegramSender:
 
 @dataclass(frozen=True, slots=True)
 class SendResult:
-    """Итог прохода: отправлено, пропущено (бот заблокирован), отложено на повтор, провалено."""
+    """Итог прохода: отправлено, пропущено (бот заблокирован), отложено на повтор, провалено.
+
+    `pause_seconds` — сколько цикл должен подождать перед следующим проходом (`retry_after`
+    Telegram); 0, если ждать не нужно.
+    """
 
     sent: int = 0
     skipped: int = 0
     retried: int = 0
     failed: int = 0
+    pause_seconds: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,23 +247,27 @@ async def _deliver(
     sender: NotificationSender,
     item: _Leased,
     now: datetime,
-) -> NotificationOutcome | None:
-    """Собирает и отправляет одно сообщение, пишет результат; `None` — строка уже не нужна."""
+) -> tuple[NotificationOutcome | None, float]:
+    """Собирает и отправляет одно сообщение, пишет результат.
+
+    Возвращает исход (`None` — строка уже не нужна) и паузу для цикла (`retry_after` или 0).
+    """
     error: BaseException | None = None
     try:
         message = await _build_message(session_factory, item)
         if message is None:
-            return None  # пользователь или группа удалены: строка уйдёт каскадом
+            return None, 0.0  # пользователь или группа удалены: строка уйдёт каскадом
         async with asyncio.timeout(SEND_TIMEOUT_SECONDS):
             await sender.send(message.chat_id, message.text, message.button_url)
     except Exception as exc:
         error = exc
     if error is None:
         await _store_result(session_factory, item, NotificationOutcome.SENT)
-        return NotificationOutcome.SENT
+        return NotificationOutcome.SENT, 0.0
 
     name = type(error).__name__
     log_extra = {"notification_id": item.id, "notification_kind": item.kind.value}
+    pause = 0.0
     if _is_unreachable(error):
         outcome = NotificationOutcome.SKIPPED
         await _store_result(session_factory, item, outcome, error=name)
@@ -260,6 +276,7 @@ async def _deliver(
         outcome = NotificationOutcome.RETRIED
         retry_at = now + timedelta(seconds=error.retry_after)
         await _store_result(session_factory, item, outcome, error=name, retry_at=retry_at)
+        pause = float(error.retry_after)
         logger.warning("Уведомление отложено (%s)", name, extra=log_extra)
     else:
         attempts = item.attempts + 1
@@ -278,7 +295,7 @@ async def _deliver(
                 attempts=attempts,
             )
             logger.warning("Уведомление отложено (%s)", name, extra=log_extra)
-    return outcome
+    return outcome, pause
 
 
 async def send_due(
@@ -294,26 +311,41 @@ async def send_due(
     Исход: успех — `sent`; бот заблокирован или чата нет — `skipped`; `TelegramRetryAfter` —
     повтор через `retry_after` секунд без роста `attempts`; сеть, 5xx, таймаут и любая другая
     ошибка — `attempts += 1` и пауза `min(30 с · 2^attempts, 1 ч)`, на 8-й неудаче `failed`.
-    Ошибка одной строки не останавливает остальные. После `stop` новые отправки не начинаются.
+    Ошибка одной строки (в том числе записи результата) не останавливает остальные. После
+    `stop` новые отправки не начинаются. После `TelegramRetryAfter` проход прекращается, а
+    `pause_seconds` в итоге просит цикл подождать: Telegram ограничил частоту для всего бота.
     """
     if stop is not None and stop.is_set():
         return SendResult()
     now = now or datetime.now(UTC)
     leased = await _lease_due(session_factory, now, batch)
     started = time.monotonic()
-    budget = LEASE.total_seconds() - SEND_TIMEOUT_SECONDS
+    budget = LEASE.total_seconds() - SEND_TIMEOUT_SECONDS - BUDGET_RESERVE_SECONDS
     counts = dict.fromkeys(NotificationOutcome, 0)
+    pause_seconds = 0.0
     for item in leased:
         if stop is not None and stop.is_set():
             break
         if time.monotonic() - started > budget:
             break  # аренда почти истекла: остаток вернётся в очередь сам
-        outcome = await _deliver(session_factory, sender, item, now)
+        try:
+            outcome, pause = await _deliver(session_factory, sender, item, now)
+        except Exception as exc:  # например, БД недоступна при записи результата
+            logger.error(
+                "Результат уведомления не записан (%s)",
+                type(exc).__name__,
+                extra={"notification_id": item.id, "notification_kind": item.kind.value},
+            )
+            continue
         if outcome is not None:
             counts[outcome] += 1
+        if pause > 0:
+            pause_seconds = pause
+            break  # остальные строки вернутся по окончании аренды
     return SendResult(
         sent=counts[NotificationOutcome.SENT],
         skipped=counts[NotificationOutcome.SKIPPED],
         retried=counts[NotificationOutcome.RETRIED],
         failed=counts[NotificationOutcome.FAILED],
+        pause_seconds=pause_seconds,
     )

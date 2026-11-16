@@ -18,7 +18,7 @@ from app.models import (
 )
 from app.schemas.event import DATES_ORDER_MESSAGE, EventCreate, EventUpdate
 from app.services.audit import iso
-from app.services.notifications import notify
+from app.services.notifications import notify_many
 
 INVITE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 INVITE_CODE_LENGTH = 6
@@ -105,7 +105,7 @@ _POINT_FIELDS = ("meeting_point", "pickup_point", "destination", "meeting_instru
 
 
 async def _notify_points_changed(session: AsyncSession, event: Event, author: User) -> None:
-    """Д12: участникам с заявкой не в `cancelled`, кроме автора правки; трансферы не трогаем."""
+    """Д12: участникам с активной заявкой без «Уехал», кроме автора; трансферы не трогаем."""
     await session.refresh(event, ["updated_at"])
     key = f"{NotificationKind.POINTS_CHANGED.value}:{event.id}:{iso(event.updated_at)}"
     user_ids = (
@@ -113,19 +113,19 @@ async def _notify_points_changed(session: AsyncSession, event: Event, author: Us
             select(Application.user_id).where(
                 Application.event_id == event.id,
                 Application.status != ApplicationStatus.CANCELLED,
+                Application.departed_at.is_(None),
                 Application.user_id != author.id,
             )
         )
     ).all()
-    for user_id in user_ids:
-        await notify(
-            session,
-            user_id=user_id,
-            event_id=event.id,
-            kind=NotificationKind.POINTS_CHANGED,
-            payload={"event_id": str(event.id)},
-            dedupe_key=key,
-        )
+    await notify_many(
+        session,
+        user_ids=user_ids,
+        event_id=event.id,
+        kind=NotificationKind.POINTS_CHANGED,
+        payload={"event_id": str(event.id)},
+        dedupe_key=key,
+    )
 
 
 async def update_event(

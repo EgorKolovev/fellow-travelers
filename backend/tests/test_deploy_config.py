@@ -297,3 +297,28 @@ def test_proxy_location_parser_flags_other_locations() -> None:
 )
 def test_pip_install_matcher_recognises_common_spellings(command: str) -> None:
     assert PIP_INSTALL.search(command)
+
+
+@pytest.mark.parametrize("path", [DEV_COMPOSE, PROD_COMPOSE], ids=["dev", "prod"])
+def test_flight_provider_and_retention_reach_the_right_containers(path: Path) -> None:
+    compose: dict[str, Any] = yaml.safe_load(path.read_text(encoding="utf-8"))
+    services = compose["services"]
+
+    # без проводки значения из .env сервера не доходят до контейнера; дефолты как в Settings
+    for name in ("api", "worker"):
+        assert str(services[name]["environment"]["FLIGHT_PROVIDER"]).strip('"') == (
+            "${FLIGHT_PROVIDER:-none}"
+        )
+    assert str(services["worker"]["environment"]["RETENTION_ENABLED"]).strip('"') == (
+        "${RETENTION_ENABLED:-false}"
+    )
+    # очистку данных запускает только воркер
+    assert "RETENTION_ENABLED" not in services["api"]["environment"]
+
+
+@pytest.mark.parametrize("path", [DEV_COMPOSE, PROD_COMPOSE], ids=["dev", "prod"])
+def test_worker_has_time_to_finish_current_work_on_stop(path: Path) -> None:
+    compose: dict[str, Any] = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+    # отправка в Telegram идёт до 20 с: docker по умолчанию убил бы воркер через 10 с
+    assert compose["services"]["worker"]["stop_grace_period"] == "30s"

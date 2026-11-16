@@ -60,4 +60,4 @@ def _plan_notifications_before_commit(session: Session) -> None:
 # может пользоваться `Session.execute` и `Session.flush`:
 # https://docs.sqlalchemy.org/en/20/orm/extensions/asyncio.html#using-events-with-the-asyncio-extension
 event.listen(Session, "before_commit", _plan_notifications_before_commit)
-event.listen(Session, "after_rollback", forget_pending)
+event.listen(Session, "after_soft_rollback", forget_pending)

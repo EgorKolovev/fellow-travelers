@@ -578,3 +578,19 @@ async def test_notification_loop_survives_errors_without_leaking_details(
     assert errors
     assert all("secret-detail" not in r.getMessage() for r in errors)
     assert all("ConnectionRefusedError" in r.getMessage() for r in errors)
+
+
+async def test_notification_loop_waits_retry_after_before_next_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = SendScript(result=SendResult(retried=1, pause_seconds=60.0))
+    monkeypatch.setattr(worker, "send_due", script)
+    stop = asyncio.Event()
+    sender: Any = object()
+    task = asyncio.ensure_future(worker.run_notification_sender(stop, sender, interval=0.01))
+
+    await asyncio.sleep(0.3)  # интервал 0.01 с дал бы десятки проходов
+    stop.set()
+    await asyncio.wait_for(task, TIMEOUT)
+
+    assert script.calls == 1

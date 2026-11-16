@@ -148,3 +148,54 @@ async def test_unknown_airport_is_not_applied_and_logged_without_number(
     messages = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert any("ZZZ" in message for message in messages)
     assert all(trip.number not in message for message in messages)
+
+
+async def test_number_and_departure_clash_with_group_trip_keeps_both_and_applies_rest(
+    db_session: AsyncSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    event = await make_event(db_session)
+    seven = DEP.replace(hour=7)
+    eight = DEP.replace(hour=8)
+    first = await make_trip(
+        db_session,
+        event_id=event.id,
+        number="SU100",
+        provider_ref="ref-1",
+        source=TripSource.PROVIDER,
+        status=TripStatus.SCHEDULED,
+        scheduled_departure=seven,
+        scheduled_arrival=seven + timedelta(hours=3),
+    )
+    manual = await make_trip(
+        db_session,
+        event_id=event.id,
+        number="SU100",
+        scheduled_departure=eight,
+        scheduled_arrival=eight + timedelta(hours=3),
+    )
+    estimate = eight + timedelta(hours=4)
+    caplog.set_level(logging.WARNING)
+
+    changed = await apply_update(
+        db_session,
+        first,
+        _flight(
+            first,
+            scheduled_departure=eight,
+            scheduled_arrival=eight + timedelta(hours=3, minutes=10),
+            estimated_arrival=estimate,
+            status=TripStatus.DELAYED,
+        ),
+    )
+
+    assert changed is True
+    assert (first.number, first.scheduled_departure) == ("SU100", seven)
+    assert first.estimated_arrival == estimate
+    assert first.status == TripStatus.DELAYED
+    assert first.scheduled_arrival == eight + timedelta(hours=3, minutes=10)
+    assert manual.scheduled_departure == eight
+    (row,) = await audit_rows(db_session, event.id)
+    assert row.details["changed_fields"] == ["scheduled_arrival", "estimated_arrival", "status"]
+    messages = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(str(first.id) in m and str(manual.id) in m for m in messages)
+    assert all("SU100" not in m for m in messages)

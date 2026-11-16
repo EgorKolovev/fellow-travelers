@@ -25,6 +25,7 @@ services:
       DEBUG: "${DEBUG}"
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
       WORKER_METRICS_PORT: "${WORKER_METRICS_PORT:-9100}"
+      FLIGHT_PROVIDER: "${FLIGHT_PROVIDER:-none}"
     depends_on:
       - db
     restart: always
@@ -61,8 +62,12 @@ services:
       DEBUG: "${DEBUG}"
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
       WORKER_METRICS_PORT: "${WORKER_METRICS_PORT:-9100}"
+      FLIGHT_PROVIDER: "${FLIGHT_PROVIDER:-none}"
+      RETENTION_ENABLED: "${RETENTION_ENABLED:-false}"
     depends_on:
       - db
+    # воркер дозавершает текущую работу после SIGTERM
+    stop_grace_period: 30s
     # метрики воркера на порту 9100 доступны только внутри сети compose
     healthcheck:
       test: ["CMD", "python", "-m", "app.worker.healthcheck"]

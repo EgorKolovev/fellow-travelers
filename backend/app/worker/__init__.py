@@ -73,15 +73,20 @@ async def run_notification_sender(
     """Отправляет уведомления из `notifications` раз в `interval` секунд, пока `stop` не выставлен.
 
     Полный проход (взяли `NOTIFICATION_BATCH` строк) повторяется сразу, неполный — после паузы.
-    Проход, начатый до остановки, дозавершает текущую отправку и не берёт следующие. Ошибка
+    После `TelegramRetryAfter` пауза не короче `retry_after`. Проход, начатый до остановки,
+    дозавершает текущую отправку и не берёт следующие. Ошибка
     прохода пишется в лог (без текста сообщений), цикл продолжается после паузы.
     """
     session_factory = get_session_factory()
     while not stop.is_set():
         taken = 0
+        pause = interval
         try:
             result = await send_due(session_factory, sender, batch=NOTIFICATION_BATCH, stop=stop)
             taken = result.sent + result.skipped + result.retried + result.failed
+            if result.pause_seconds > 0:  # Telegram просит подождать (`retry_after`)
+                taken = 0
+                pause = max(interval, result.pause_seconds)
         except Exception as exc:
             logger.error(
                 "Ошибка цикла отправки уведомлений (%s), повтор после паузы", type(exc).__name__
@@ -89,4 +94,4 @@ async def run_notification_sender(
         if taken >= NOTIFICATION_BATCH:
             continue
         with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(stop.wait(), timeout=interval)
+            await asyncio.wait_for(stop.wait(), timeout=pause)

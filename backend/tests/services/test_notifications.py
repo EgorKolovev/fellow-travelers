@@ -6,6 +6,7 @@
 
 import uuid
 from collections.abc import Sequence
+from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import (
     ActorKind,
     Application,
+    ApplicationStatus,
     AuditAction,
     AuditReason,
     Event,
@@ -220,3 +222,84 @@ async def test_planner_ignores_rolled_back_savepoint(db_session: AsyncSession) -
     assert await stored(db_session) == []
     count = await db_session.scalar(select(func.count()).select_from(Notification))
     assert count == 0
+
+
+async def test_savepoint_rollback_keeps_history_of_outer_transaction(
+    db_session: AsyncSession,
+) -> None:
+    event, transfer, members = await pair(db_session)
+    record_created(db_session, event, transfer, members)  # внешняя транзакция
+    try:
+        async with db_session.begin_nested():
+            raise RuntimeError("обработанная ошибка внутри savepoint")
+    except RuntimeError:
+        pass
+
+    await db_session.commit()
+
+    rows = await stored(db_session, event.id)
+    assert {row.user_id for row in rows} == {m.user_id for m in members}
+
+
+async def _leave(
+    session: AsyncSession,
+    event: Event,
+    transfer: Transfer,
+    leaver: Application,
+    reason: AuditReason,
+) -> None:
+    leaver.transfer_id = None
+    leaver.status = ApplicationStatus.SEARCHING
+    await session.flush()
+    record(
+        session,
+        event_id=event.id,
+        action=AuditAction.TRANSFER_LEFT,
+        actor=SYSTEM,
+        reason=reason,
+        application=leaver,
+        transfer_id=transfer.id,
+    )
+
+
+async def test_leaving_because_of_cancelled_flight_does_not_message_the_leaver(
+    db_session: AsyncSession,
+) -> None:
+    event, transfer, members = await pair(db_session)
+    third = await make_application(db_session, event_id=event.id, transfer_id=transfer.id)
+    await _leave(db_session, event, transfer, third, AuditReason.FLIGHT_CANCELLED)
+
+    await db_session.commit()
+
+    kinds = {row.user_id: row.kind for row in await stored(db_session, event.id)}
+    assert kinds == {m.user_id: NotificationKind.TRANSFER_CHANGED for m in members}
+
+
+async def test_leaving_for_ordinary_reason_still_messages_the_leaver(
+    db_session: AsyncSession,
+) -> None:
+    event, transfer, members = await pair(db_session)
+    third = await make_application(db_session, event_id=event.id, transfer_id=transfer.id)
+    await _leave(db_session, event, transfer, third, AuditReason.INCOMPATIBLE_AFTER_CHANGE)
+
+    await db_session.commit()
+
+    kinds = {row.user_id: row.kind for row in await stored(db_session, event.id)}
+    assert kinds[third.user_id] == NotificationKind.TRANSFER_LEFT
+    assert {kinds[m.user_id] for m in members} == {NotificationKind.TRANSFER_CHANGED}
+
+
+async def test_departed_member_is_not_notified_about_transfer_changes(
+    db_session: AsyncSession,
+) -> None:
+    event, transfer, members = await pair(db_session)
+    departed = await make_application(
+        db_session, event_id=event.id, transfer_id=transfer.id, departed_at=datetime.now(UTC)
+    )
+    await _leave(db_session, event, transfer, members[1], AuditReason.MEMBER_LEFT)
+
+    await db_session.commit()
+
+    users = {row.user_id for row in await stored(db_session, event.id)}
+    assert departed.user_id not in users
+    assert users == {members[0].user_id, members[1].user_id}

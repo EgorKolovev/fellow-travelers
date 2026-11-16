@@ -76,6 +76,26 @@ async def test_fake_generates_deterministic_flight_without_added_flights() -> No
     assert await provider.fetch(generated.provider_ref) == generated
 
 
+async def test_fake_fetch_restores_generated_flight_in_another_instance() -> None:
+    found = (await FakeFlightProvider().search("su 1234", date(2026, 11, 12)))[0]
+    worker_side = FakeFlightProvider()  # отдельный процесс: поиска он не видел
+
+    assert await worker_side.fetch(found.provider_ref) == found
+    assert await worker_side.fetch("fake:SU1234:not-a-date") is None
+    assert await worker_side.fetch("fake::2026-11-12") is None
+    assert await worker_side.fetch("other:SU1234:2026-11-12") is None
+    assert await worker_side.fetch("ref-1") is None
+
+
+async def test_fake_generation_does_not_accumulate_flights() -> None:
+    provider = FakeFlightProvider()
+
+    for day in range(1, 29):
+        await provider.search("SU1234", date(2026, 11, day))
+
+    assert provider._flights == {}
+
+
 async def test_fake_unavailable_raises_in_both_methods() -> None:
     provider = FakeFlightProvider([flight()], unavailable=True)
 

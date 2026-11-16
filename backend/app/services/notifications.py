@@ -10,7 +10,7 @@
 обработчик может пользоваться обычным `Session.execute` и `Session.flush`.
 
 В `payload` только белый список: `event_id`, `transfer_id`, `trip_id`, `effective_arrival`,
-`status`.
+`status`, `role` (у `flight_changed`: `passenger` или `mate`).
 Телефонов, имён, username и номеров заявок попутчиков там нет: текст собирает отправитель.
 """
 
@@ -24,13 +24,14 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, SessionTransaction
 
 from app.models import (
     Application,
     ApplicationStatus,
     AuditAction,
     AuditLog,
+    AuditReason,
     Notification,
     NotificationKind,
     Trip,
@@ -52,6 +53,10 @@ _PRIORITY = (
 _RANK = {kind: rank for rank, kind in enumerate(_PRIORITY)}
 
 _CONFLICT_COLUMNS = ["user_id", "dedupe_key"]
+
+# `payload.role` у `flight_changed`: чей это рейс для адресата
+_ROLE_PASSENGER = "passenger"
+_ROLE_MATE = "mate"
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +122,24 @@ async def notify(
     )
 
 
+async def notify_many(
+    session: AsyncSession,
+    *,
+    user_ids: Iterable[uuid.UUID],
+    event_id: uuid.UUID,
+    kind: NotificationKind,
+    payload: Mapping[str, Any],
+    dedupe_key: str,
+) -> None:
+    """Одно сообщение каждому из `user_ids` одним INSERT; семантика та же, что у `notify`."""
+    rows = [
+        _row(user_id=u, event_id=event_id, kind=kind, payload=payload, dedupe_key=dedupe_key)
+        for u in user_ids
+    ]
+    if rows:
+        await session.execute(_insert_ignoring_duplicates(rows))
+
+
 class _Planner:
     def __init__(self, session: Session, entries: list[AuditLog]) -> None:
         self.session = session
@@ -156,11 +179,14 @@ class _Planner:
             self.drafts[(entry.event_id, user_id)].append(_Candidate(kind, entry.id, dict(payload)))
 
     def _members_of(self, transfer_id: uuid.UUID) -> list[uuid.UUID]:
-        """Пользователи заявок, которые сейчас стоят в трансфере."""
+        """Пользователи заявок, которые сейчас стоят в трансфере и ещё не уехали."""
         if transfer_id not in self._members:
             self._members[transfer_id] = list(
                 self.session.scalars(
-                    select(Application.user_id).where(Application.transfer_id == transfer_id)
+                    select(Application.user_id).where(
+                        Application.transfer_id == transfer_id,
+                        Application.departed_at.is_(None),
+                    )
                 )
             )
         return self._members[transfer_id]
@@ -200,7 +226,9 @@ class _Planner:
         if entry.transfer_id is None:
             return
         payload = self._transfer_payload(entry)
-        self._add(entry, [entry.subject_user_id], NotificationKind.TRANSFER_LEFT, payload)
+        # вышедшему из-за отмены рейса уже пришло `flight_cancelled`: второго сообщения нет
+        if entry.reason != AuditReason.FLIGHT_CANCELLED:
+            self._add(entry, [entry.subject_user_id], NotificationKind.TRANSFER_LEFT, payload)
         # расформированный трансфер пуст: оставшимся придёт их собственный `transfer_left`
         self._add(entry, self._others(entry), NotificationKind.TRANSFER_CHANGED, payload)
 
@@ -220,24 +248,31 @@ class _Planner:
             "effective_arrival": iso(trip.effective_arrival),
             "status": trip.status.value,
         }
+        passengers, mates = self._trip_audience(trip_id)
         if became_cancelled:
-            kind = NotificationKind.FLIGHT_CANCELLED
-        else:
-            if trip.notified_arrival is None:
-                # то, что люди видели до первой правки, и есть «последнее сообщённое» значение
-                trip.notified_arrival = datetime.fromisoformat(
-                    first.details["effective_arrival_before"]
-                )
-            base = trip.notified_arrival
-            after = datetime.fromisoformat(last.details["effective_arrival_after"])
-            if abs(after - base) < ARRIVAL_THRESHOLD:
-                return
-            kind = NotificationKind.FLIGHT_CHANGED
-            trip.notified_arrival = after
-        self._add(first, self._trip_audience(trip_id), kind, payload)
+            # попутчикам с других рейсов состав объяснят `transfer_changed` / `transfer_left`
+            self._add(first, passengers, NotificationKind.FLIGHT_CANCELLED, payload)
+            return
+        if trip.notified_arrival is None:
+            # то, что люди видели до первой правки, и есть «последнее сообщённое» значение
+            trip.notified_arrival = datetime.fromisoformat(
+                first.details["effective_arrival_before"]
+            )
+        base = trip.notified_arrival
+        after = datetime.fromisoformat(last.details["effective_arrival_after"])
+        if abs(after - base) < ARRIVAL_THRESHOLD:
+            return
+        trip.notified_arrival = after
+        self._add(
+            first,
+            passengers,
+            NotificationKind.FLIGHT_CHANGED,
+            {**payload, "role": _ROLE_PASSENGER},
+        )
+        self._add(first, mates, NotificationKind.FLIGHT_CHANGED, {**payload, "role": _ROLE_MATE})
 
-    def _trip_audience(self, trip_id: uuid.UUID) -> list[uuid.UUID]:
-        """Пассажиры рейса и их попутчики по трансферу; отменившие и уехавшие не в счёт."""
+    def _trip_audience(self, trip_id: uuid.UUID) -> tuple[list[uuid.UUID], list[uuid.UUID]]:
+        """Пассажиры рейса и отдельно их попутчики по трансферу; отменившие и уехавшие не в счёт."""
         waiting = (
             Application.status != ApplicationStatus.CANCELLED,
             Application.departed_at.is_(None),
@@ -247,17 +282,18 @@ class _Planner:
                 Application.trip_id == trip_id, *waiting
             )
         ).all()
-        users = {user_id for user_id, _ in rows}
+        passengers = {user_id for user_id, _ in rows}
         transfer_ids = {transfer_id for _, transfer_id in rows if transfer_id is not None}
+        mates: set[uuid.UUID] = set()
         if transfer_ids:
-            users.update(
+            mates.update(
                 self.session.scalars(
                     select(Application.user_id).where(
                         Application.transfer_id.in_(transfer_ids), *waiting
                     )
                 )
             )
-        return list(users)
+        return list(passengers), list(mates - passengers)
 
     # ----------------------------------------------------------------- запись
 
@@ -295,9 +331,15 @@ def plan_notifications(session: Session) -> None:
         session.flush()
 
 
-def forget_pending(session: Session) -> None:
-    """Откат транзакции: накопленные записи истории исчезли вместе с ней."""
-    session.info.pop(PENDING_KEY, None)
+def forget_pending(session: Session, previous_transaction: SessionTransaction) -> None:
+    """Откат корневой транзакции: накопленные записи истории исчезли вместе с ней.
+
+    Подключён к `after_soft_rollback`: `after_rollback` срабатывает и на откат SAVEPOINT и тогда
+    стёр бы историю внешней транзакции. Откат savepoint записи оставляет: откатанные из них
+    планировщик отсеивает сам (`e in session`).
+    """
+    if previous_transaction.parent is None:
+        session.info.pop(PENDING_KEY, None)
 
 
-__all__ = ["PENDING_KEY", "forget_pending", "notify", "plan_notifications"]
+__all__ = ["PENDING_KEY", "forget_pending", "notify", "notify_many", "plan_notifications"]

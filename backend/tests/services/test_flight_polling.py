@@ -16,7 +16,7 @@ from prometheus_client import REGISTRY
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from app.flights import FakeFlightProvider, ProviderFlight
+from app.flights import FakeFlightProvider, ProviderFlight, polling
 from app.models import (
     ApplicationStatus,
     BackgroundJob,
@@ -27,7 +27,12 @@ from app.models import (
     User,
 )
 from app.services import flight_polling
-from app.services.flight_polling import LEASE, UNAVAILABLE_RETRY, PollResult, poll_due_trips
+from app.services.flight_polling import (
+    ERROR_RETRY,
+    UNAVAILABLE_RETRY,
+    PollResult,
+    poll_due_trips,
+)
 from tests.factories import make_application, make_event, make_trip, make_user
 from tests.helpers.audit_replay import audit_rows
 from tests.helpers.concurrency import wait
@@ -301,6 +306,19 @@ async def test_cancelled_flight_stops_polling(
     assert trip.next_poll_at is None
 
 
+class FailingProvider(CountingProvider):
+    """`fetch` падает на одном ref обычным исключением (не `ProviderUnavailableError`)."""
+
+    def __init__(self, bad_ref: str, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        self.bad_ref = bad_ref
+
+    async def fetch(self, provider_ref: str) -> ProviderFlight | None:
+        if provider_ref == self.bad_ref:
+            raise RuntimeError("сбой разбора ответа")
+        return await super().fetch(provider_ref)
+
+
 async def test_error_in_one_trip_does_not_stop_others(
     sessions: async_sessionmaker[AsyncSession],
     group: Group,
@@ -308,12 +326,9 @@ async def test_error_in_one_trip_does_not_stop_others(
 ) -> None:
     bad = await _trip(sessions, group, "SU0001")
     good = await _trip(sessions, group, "SU0002")
-    # первый рейс при применении нарушит уникальность (номер и вылет уже заняты вторым)
-    provider = CountingProvider(
-        [
-            _flight("ref-SU0001", "SU0002"),
-            _flight("ref-SU0002", "SU0002", estimated_arrival=ARR + timedelta(minutes=30)),
-        ]
+    provider = FailingProvider(
+        "ref-SU0001",
+        [_flight("ref-SU0002", "SU0002", estimated_arrival=ARR + timedelta(minutes=30))],
     )
     caplog.set_level(logging.ERROR)
     before = _counter("error")
@@ -324,10 +339,54 @@ async def test_error_in_one_trip_does_not_stop_others(
     assert _counter("error") == before + 1
     assert (await _load(sessions, good)).estimated_arrival == ARR + timedelta(minutes=30)
     bad_trip = await _load(sessions, bad)
-    assert bad_trip.next_poll_at == NOW + LEASE  # аренда истечёт, и рейс опросят снова
+    # пауза вместо ожидания конца аренды, но не позже расписания Д2 (там 60 мин)
+    assert bad_trip.next_poll_at == NOW + ERROR_RETRY
     (record,) = [r for r in caplog.records if r.levelno == logging.ERROR]
-    assert "IntegrityError" in record.getMessage()
+    assert "RuntimeError" in record.getMessage()
     assert "SU000" not in record.getMessage()
+
+
+async def test_error_pause_is_not_later_than_schedule(
+    sessions: async_sessionmaker[AsyncSession], group: Group
+) -> None:
+    trip_id = await _trip(sessions, group, "SU0001")
+    now = DEP - timedelta(hours=1)  # до вылета меньше 6 часов: расписание Д2 даёт 10 минут
+    async with sessions() as session:
+        await session.execute(update(Trip).where(Trip.id == trip_id).values(next_poll_at=now))
+        await session.commit()
+    provider = FailingProvider("ref-SU0001")
+    assert polling.next_poll_at(
+        scheduled_departure=DEP, effective_arrival=ARR, status=TripStatus.SCHEDULED, now=now
+    ) == now + timedelta(minutes=10)
+
+    await poll_due_trips(sessions, provider, now=now)
+
+    assert (await _load(sessions, trip_id)).next_poll_at == now + timedelta(minutes=10)
+
+
+async def test_error_after_schedule_end_stops_polling(
+    sessions: async_sessionmaker[AsyncSession], group: Group
+) -> None:
+    trip_id = await _trip(sessions, group, "SU0001")
+    late = ARR + timedelta(hours=3)  # позже «прибытие + 2 ч»: по Д2 опрос прекращён
+    provider = FailingProvider("ref-SU0001")
+
+    await poll_due_trips(sessions, provider, now=late)
+
+    assert (await _load(sessions, trip_id)).next_poll_at is None
+
+
+async def test_unavailable_after_schedule_end_stops_polling(
+    sessions: async_sessionmaker[AsyncSession], group: Group
+) -> None:
+    trip_id = await _trip(sessions, group, "SU0001")
+    late = ARR + timedelta(hours=3)
+    provider = CountingProvider([_flight("ref-SU0001", "SU0001")], unavailable=True)
+
+    result = await poll_due_trips(sessions, provider, now=late)
+
+    assert result == PollResult(polled=1, unavailable=1)
+    assert (await _load(sessions, trip_id)).next_poll_at is None
 
 
 async def test_batch_limits_and_orders_by_next_poll(

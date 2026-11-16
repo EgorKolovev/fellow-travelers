@@ -26,8 +26,7 @@ def render(
     trip_number: str | None,
     arrival_local: datetime | None,
 ) -> str:
-    """Текст сообщения по-русски. `payload` в текст не попадает: всё нужное пришло аргументами."""
-    del payload
+    """Текст сообщения по-русски. Из `payload` берётся только `role` (свой рейс или попутчика)."""
     flight = f"Рейс {trip_number}" if trip_number else "Рейс"
     match kind:
         case NotificationKind.TRANSFER_ASSIGNED:
@@ -45,6 +44,8 @@ def render(
                 "Проверьте детали поездки."
             )
         case NotificationKind.FLIGHT_CHANGED:
+            if payload.get("role") == "mate":
+                flight = f"Рейс попутчика {trip_number}" if trip_number else "Рейс попутчика"
             if arrival_local is None:
                 return f"{flight}: расчётное прибытие изменилось — «{title}»."
             return (

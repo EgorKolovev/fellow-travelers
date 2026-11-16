@@ -322,3 +322,60 @@ async def test_fake_provider_setting_generates_flight(
 def _clear_overrides(app: FastAPI) -> Iterator[None]:
     yield
     app.dependency_overrides.pop(get_flight_provider, None)
+
+
+async def test_two_refs_for_one_flight_give_one_trip(
+    api_client: AsyncClient, db_session: AsyncSession, event: Event, fake: FakeFlightProvider
+) -> None:
+    fake.add(provider_flight(provider_ref="ref-2"))  # тот же номер и вылет под другим ref
+
+    response = await search(api_client, event.id)
+
+    assert len(response.json()) == 1
+    [stored] = await trips_in(db_session, event.id)
+    assert stored.provider_ref == "ref-1"
+
+
+async def test_trip_of_other_provider_ref_is_not_adopted_or_duplicated(
+    app: FastAPI,
+    api_client: AsyncClient,
+    db_session: AsyncSession,
+    event: Event,
+    fake: FakeFlightProvider,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    first = (await search(api_client, event.id)).json()
+    other = FakeFlightProvider([provider_flight(provider_ref="ref-2")])
+    app.dependency_overrides[get_flight_provider] = lambda: other
+
+    with caplog.at_level(logging.WARNING, logger="app.services.flights"):
+        response = await search(api_client, event.id)
+
+    assert response.json() == []
+    [stored] = await trips_in(db_session, event.id)
+    assert str(stored.id) == first[0]["id"]
+    assert stored.provider_ref == "ref-1"
+    assert any(r.levelno == logging.WARNING for r in caplog.records)
+    assert all("SU1234" not in r.getMessage() for r in caplog.records)
+
+
+async def test_connection_is_released_while_waiting_for_provider(
+    api_client: AsyncClient,
+    db_session: AsyncSession,
+    event: Event,
+    fake: FakeFlightProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    in_transaction: list[bool] = []
+    original = flights_service._query_provider
+
+    async def spy(*args: Any, **kwargs: Any) -> list[ProviderFlight]:
+        in_transaction.append(db_session.in_transaction())
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(flights_service, "_query_provider", spy)
+
+    response = await search(api_client, event.id)
+
+    assert response.status_code == 200
+    assert in_transaction == [False]

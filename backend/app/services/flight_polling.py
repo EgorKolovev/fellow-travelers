@@ -25,6 +25,7 @@ PROVIDER_TIMEOUT_SECONDS = 10.0
 # аренда: пока рейс опрашивают, другой воркер его не берёт; если воркер упал, рейс вернётся сам
 LEASE = timedelta(minutes=5)
 UNAVAILABLE_RETRY = timedelta(minutes=10)
+ERROR_RETRY = timedelta(minutes=10)
 
 _ACTIVE_STATUSES = (ApplicationStatus.SEARCHING, ApplicationStatus.ASSIGNED, ApplicationStatus.SOLO)
 
@@ -84,16 +85,27 @@ async def _lease_due(
     return [_Leased(row.id, row.event_id, str(row.provider_ref)) for row in trips]
 
 
-async def _store_unavailable(
-    session_factory: async_sessionmaker[AsyncSession], leased: _Leased, now: datetime
+async def _store_retry(
+    session_factory: async_sessionmaker[AsyncSession],
+    leased: _Leased,
+    now: datetime,
+    *,
+    pause: timedelta,
+    outcome: FlightPollOutcome | None = None,
 ) -> None:
+    """Повтор через `pause`, но не позже расписания Д2; если расписание кончилось — `None`."""
     async with session_factory() as session:
-        await session.execute(
-            update(Trip)
-            .where(Trip.id == leased.trip_id)
-            .values(next_poll_at=now + UNAVAILABLE_RETRY)
-        )
-        defer_increment(session, metrics.flight_polls_total.labels(FlightPollOutcome.UNAVAILABLE))
+        trip = await session.scalar(select(Trip).where(Trip.id == leased.trip_id))
+        if trip is not None:
+            scheduled = polling.next_poll_at(
+                scheduled_departure=trip.scheduled_departure,
+                effective_arrival=trip.effective_arrival,
+                status=trip.status,
+                now=now,
+            )
+            trip.next_poll_at = None if scheduled is None else min(scheduled, now + pause)
+        if outcome is not None:
+            defer_increment(session, metrics.flight_polls_total.labels(outcome))
         await session.commit()
 
 
@@ -141,7 +153,8 @@ async def poll_due_trips(
     """Один проход опроса: рейсы, которым пора, спрашиваются у поставщика и обновляются.
 
     `polled` — сколько рейсов взято в этом проходе. Ошибка одного рейса не останавливает
-    остальные: она пишется в лог (имя класса исключения), рейс ждёт конца аренды. Если задан
+    остальные: она пишется в лог (имя класса исключения), рейс получает паузу `ERROR_RETRY`
+    (не позже расписания Д2; если расписание закончилось, опрос прекращается). Если задан
     `stop`, после него новые рейсы не начинаются.
     """
     now = now or datetime.now(UTC)
@@ -157,7 +170,13 @@ async def poll_due_trips(
                     flight = await provider.fetch(item.provider_ref)
             except (ProviderUnavailableError, TimeoutError):
                 logger.warning("Поставщик рейсов не ответил", extra={"trip_id": str(item.trip_id)})
-                await _store_unavailable(session_factory, item, now)
+                await _store_retry(
+                    session_factory,
+                    item,
+                    now,
+                    pause=UNAVAILABLE_RETRY,
+                    outcome=FlightPollOutcome.UNAVAILABLE,
+                )
                 unavailable += 1
                 continue
             outcome = await _store_answer(session_factory, item, flight, now)
@@ -168,6 +187,14 @@ async def poll_due_trips(
                 extra={"trip_id": str(item.trip_id)},
             )
             metrics.flight_polls_total.labels(FlightPollOutcome.ERROR).inc()
+            try:
+                await _store_retry(session_factory, item, now, pause=ERROR_RETRY)
+            except Exception as retry_exc:  # аренда истечёт сама и вернёт рейс в опрос
+                logger.error(
+                    "Пауза после ошибки опроса не записана (%s)",
+                    type(retry_exc).__name__,
+                    extra={"trip_id": str(item.trip_id)},
+                )
             continue
         if outcome == FlightPollOutcome.CHANGED:
             changed += 1

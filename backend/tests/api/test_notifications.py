@@ -47,7 +47,7 @@ from tests.helpers.jobs import shared_session_factory
 
 ADMIN_TELEGRAM_ID = 500
 K = NotificationKind
-PAYLOAD_KEYS = {"event_id", "transfer_id", "trip_id", "effective_arrival", "status"}
+PAYLOAD_KEYS = {"event_id", "transfer_id", "trip_id", "effective_arrival", "status", "role"}
 # телефон и имя фабричного пользователя `user` (tests/api/conftest.py)
 PERSONAL = ("+79991234567", "Ivan", "ivan")
 
@@ -328,13 +328,15 @@ async def test_admin_edit_by_twenty_minutes_tells_passenger_and_mate_and_sets_ba
     }
     assert first_departed.user_id not in await kinds(db_session, group)
     assert cancelled.user_id not in await kinds(db_session, group)
-    (row, _) = await rows_of(db_session, group)
-    assert row.payload == {
+    by_user = {row.user_id: row for row in await rows_of(db_session, group)}
+    common = {
         "event_id": str(group.id),
         "trip_id": str(trip.id),
         "effective_arrival": "2026-11-12T05:25:00+00:00",
         "status": "scheduled",
     }
+    assert by_user[passenger.user_id].payload == {**common, "role": "passenger"}
+    assert by_user[mate.user_id].payload == {**common, "role": "mate"}
     fresh = await db_session.get(Trip, trip.id, populate_existing=True)
     assert fresh is not None
     assert fresh.notified_arrival == datetime(2026, 11, 12, 5, 25, tzinfo=UTC)
@@ -364,10 +366,10 @@ async def test_repeated_edit_without_changes_makes_no_messages(
     assert len(await rows_of(db_session, group)) == count == 2
 
 
-async def test_provider_cancellation_tells_passengers_and_mates_in_worker_session(
+async def test_provider_cancellation_tells_only_passengers_in_worker_session(
     db_session: AsyncSession,
 ) -> None:
-    group, trip, passenger, mate = await _flight_group(
+    group, trip, passenger, _ = await _flight_group(
         db_session, provider_ref="fake:SU1", source=TripSource.PROVIDER
     )
     trip.number = "SU1"
@@ -389,10 +391,10 @@ async def test_provider_cancellation_tells_passengers_and_mates_in_worker_sessio
     result = await poll_due_trips(shared_session_factory(db_session), provider)
 
     assert result.changed == 1
-    assert await kinds(db_session, group) == {
-        passenger.user_id: K.FLIGHT_CANCELLED,
-        mate.user_id: K.FLIGHT_CANCELLED,
-    }
+    # отмену рейса получают только его пассажиры; попутчик узнает из пересчёта трансфера
+    assert await kinds(db_session, group) == {passenger.user_id: K.FLIGHT_CANCELLED}
+    (row,) = await rows_of(db_session, group)
+    assert "role" not in row.payload
     # повторный опрос без изменений новых сообщений не создаёт
     fresh = await db_session.get(Trip, trip.id, populate_existing=True)
     assert fresh is not None
@@ -400,7 +402,7 @@ async def test_provider_cancellation_tells_passengers_and_mates_in_worker_sessio
     await db_session.commit()
     again = await poll_due_trips(shared_session_factory(db_session), provider)
     assert again.changed == 0
-    assert len(await rows_of(db_session, group)) == 2
+    assert len(await rows_of(db_session, group)) == 1
 
 
 async def _iata(session: AsyncSession, trip: Trip) -> tuple[str, str]:
@@ -422,6 +424,9 @@ async def test_points_change_tells_participants_except_author_and_cancelled(
     searching = await app_at(db_session, group, status=ApplicationStatus.SEARCHING)
     cancelled = await app_at(db_session, group, status=ApplicationStatus.CANCELLED)
     own = await app_at(db_session, group, user=admin)
+    departed = await app_at(
+        db_session, group, status=ApplicationStatus.SOLO, departed_at=BASE_ARRIVAL
+    )
     await db_session.commit()
 
     async def patch(payload: dict[str, Any]) -> None:
@@ -436,6 +441,7 @@ async def test_points_change_tells_participants_except_author_and_cancelled(
     assert {row.user_id for row in rows} == {active.user_id, searching.user_id}
     assert cancelled.user_id not in {row.user_id for row in rows}
     assert own.user_id not in {row.user_id for row in rows}
+    assert departed.user_id not in {row.user_id for row in rows}
     for row in rows:
         assert row.kind == K.POINTS_CHANGED
         assert row.payload == {"event_id": str(group.id)}
