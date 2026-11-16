@@ -83,3 +83,19 @@ class JobKind(StrEnum):
 class JobStatus(StrEnum):
     PENDING = "pending"
     FAILED = "failed"
+
+
+class NotificationKind(StrEnum):
+    TRANSFER_ASSIGNED = "transfer_assigned"
+    TRANSFER_CHANGED = "transfer_changed"
+    TRANSFER_LEFT = "transfer_left"
+    POINTS_CHANGED = "points_changed"
+    FLIGHT_CHANGED = "flight_changed"
+    FLIGHT_CANCELLED = "flight_cancelled"
+
+
+class NotificationStatus(StrEnum):
+    PENDING = "pending"
+    SENT = "sent"
+    SKIPPED = "skipped"
+    FAILED = "failed"

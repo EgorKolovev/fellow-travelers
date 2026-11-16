@@ -8,6 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import ActorKind, Application, AuditAction, AuditLog, AuditReason
 from app.observability import context
 
+PENDING_KEY = "fellow_audit_pending"
+
 
 @dataclass(frozen=True, slots=True)
 class Actor:
@@ -49,19 +51,20 @@ def record(
     enum, моменты через `iso()`, id строками. Телефона, имён и username там быть не должно.
     """
     request_id = context.request_id.get()
-    session.add(
-        AuditLog(
-            event_id=event_id,
-            action=action,
-            reason=reason,
-            actor_kind=actor.kind,
-            actor_user_id=actor.user_id,
-            subject_user_id=application.user_id if application is not None else None,
-            application_id=application.id if application is not None else None,
-            transfer_id=transfer_id,
-            trip_id=trip_id,
-            job_id=context.job_id.get(),
-            request_id=request_id[:REQUEST_ID_MAX_LENGTH] if request_id is not None else None,
-            details=dict(details) if details is not None else {},
-        )
+    entry = AuditLog(
+        event_id=event_id,
+        action=action,
+        reason=reason,
+        actor_kind=actor.kind,
+        actor_user_id=actor.user_id,
+        subject_user_id=application.user_id if application is not None else None,
+        application_id=application.id if application is not None else None,
+        transfer_id=transfer_id,
+        trip_id=trip_id,
+        job_id=context.job_id.get(),
+        request_id=request_id[:REQUEST_ID_MAX_LENGTH] if request_id is not None else None,
+        details=dict(details) if details is not None else {},
     )
+    session.add(entry)
+    # из записей планировщик перед commit строит уведомления (services/notifications.py)
+    session.info.setdefault(PENDING_KEY, []).append(entry)

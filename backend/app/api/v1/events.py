@@ -29,7 +29,7 @@ async def update_event(
     event_id: uuid.UUID, data: EventUpdate, user: CurrentUser, session: SessionDep
 ) -> Event:
     event = await get_event_for_admin(session, event_id, user)
-    event = await events_service.update_event(session, event, data)
+    event = await events_service.update_event(session, event, data, user)
     return Event.build(
         event, user_id=user.id, is_participant=await is_member(session, event.id, user.id)
     )

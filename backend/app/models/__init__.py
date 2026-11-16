@@ -9,6 +9,8 @@ from app.models.enums import (
     JobKind,
     JobStatus,
     LocationKind,
+    NotificationKind,
+    NotificationStatus,
     TransferOrigin,
     TransferStatus,
     TransportMode,
@@ -18,6 +20,7 @@ from app.models.enums import (
 from app.models.event import Event, Membership
 from app.models.job import BackgroundJob
 from app.models.location import Location
+from app.models.notification import Notification
 from app.models.transfer import Transfer
 from app.models.trip import Trip
 from app.models.user import User
@@ -37,6 +40,9 @@ __all__ = [
     "Location",
     "LocationKind",
     "Membership",
+    "Notification",
+    "NotificationKind",
+    "NotificationStatus",
     "TimestampMixin",
     "Transfer",
     "TransferOrigin",
