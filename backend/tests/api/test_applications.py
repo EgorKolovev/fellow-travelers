@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 from httpx import AsyncClient, Response
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -1722,12 +1722,20 @@ async def test_put_assigned_incompatible_edit_gives_seat_to_waiting_not_to_edito
 ) -> None:
     """Д5, P4: E создан первым, ушёл на +20; освободившееся место занимает W, а не пара E+W."""
     w_user = await join(db_session, event, 103)
-    await apply(api_client, db_session, event, 42)  # E
+    editor = await apply(api_client, db_session, event, 42)  # E
     await apply(api_client, db_session, event, 101)  # X
     triple = await apply(api_client, db_session, event, 102)  # Y
     transfer_id = triple.json()["transfer_id"]
     waiting = await apply(api_client, db_session, event, w_user.telegram_id, minutes=10)
     assert waiting.json()["status"] == "searching"  # машина полная
+    # в одной тестовой транзакции у всех строк одинаковый created_at, и порядок решал бы
+    # случайный UUID: делаем E явно старше W, чтобы подбор без `skip` отдал место E
+    for application_id, age in ((editor.json()["id"], 2), (waiting.json()["id"], 1)):
+        await db_session.execute(
+            update(Application)
+            .where(Application.id == uuid.UUID(application_id))
+            .values(created_at=func.now() - timedelta(hours=age))
+        )
     trip_id = await trip_at(db_session, event, 20)
 
     response = await put_app(api_client, db_session, event, body(trip_id))

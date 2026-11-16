@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 from httpx import AsyncClient, Response
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -106,12 +106,15 @@ async def cancel(
     assert response.status_code == 200
 
 
-async def backdate(session: AsyncSession, application: Application, minutes: int) -> None:
-    """Отметка «Уехал» была `minutes` минут назад."""
+async def backdate(
+    session: AsyncSession, application: Application, minutes: float | timedelta
+) -> None:
+    """Отметка «Уехал» была `minutes` назад по часам БД (как считает окно код)."""
+    ago = minutes if isinstance(minutes, timedelta) else timedelta(minutes=minutes)
     await session.execute(
         update(Application)
         .where(Application.id == application.id)
-        .values(departed_at=datetime.now(UTC) - timedelta(minutes=minutes))
+        .values(departed_at=func.now() - ago)
     )
     await session.flush()
 
@@ -462,6 +465,31 @@ async def test_undo_after_window_conflicts(
     assert response.json()["error"]["code"] == "ALREADY_DEPARTED"
     stored = await row(db_session, first)
     assert (stored.departed_at is not None, stored.departed_from_transfer_id) == (True, transfer.id)
+
+
+@pytest.mark.parametrize(
+    ("ago", "expected"),
+    [
+        (timedelta(minutes=30) - timedelta(microseconds=1), 200),
+        (timedelta(minutes=30), 200),  # Д7: «позже 30 минут» — ровно 30:00 ещё можно
+        (timedelta(minutes=30, seconds=1), 409),
+    ],
+    ids=["just_inside", "exactly_30_minutes", "just_outside"],
+)
+async def test_undo_window_boundary_uses_db_clock(
+    api_client: AsyncClient,
+    db_session: AsyncSession,
+    event: Event,
+    ago: timedelta,
+    expected: int,
+) -> None:
+    _, first, _ = await pair(db_session, event)
+    await admin_app_departed(api_client, event.id, first.id)
+    await backdate(db_session, first, ago)  # now() в транзакции теста неизменен: граница точна
+
+    response = await put_marks(api_client, event.id, first, db_session, {"departed": False})
+
+    assert response.status_code == expected
 
 
 @pytest.mark.parametrize("flag", [True, False])

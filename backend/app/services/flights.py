@@ -188,6 +188,13 @@ async def _save(
     )
     if existing is not None:
         await apply_update(session, existing, flight)
+        if existing.next_poll_at is None and existing.status not in (
+            TripStatus.LANDED,
+            TripStatus.CANCELLED,
+        ):
+            # опрос был прекращён (отмена); рейс снова живой — воркер подхватит его сразу
+            existing.next_poll_at = datetime.now(UTC)
+            await session.flush()
         return existing
     manual = await session.scalar(
         select(Trip)

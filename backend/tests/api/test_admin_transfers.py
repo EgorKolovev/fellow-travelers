@@ -1,13 +1,16 @@
 """POST/PUT ручного состава трансфера (CAP-06, CAP-11): docs/spec-mvp.md, M-03 и Д6."""
 
+import asyncio
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from fastapi import FastAPI
 from httpx import AsyncClient, Response
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import delete, select, update
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.models import (
     Application,
@@ -22,6 +25,7 @@ from app.models import (
     TripStatus,
     User,
 )
+from app.services.matching import lock_event
 from tests.api.conftest import USER_TELEGRAM_ID, auth_headers
 from tests.factories import (
     get_location,
@@ -34,6 +38,7 @@ from tests.factories import (
     make_user,
 )
 from tests.helpers.audit_replay import assert_history_matches_transfers, audit_rows
+from tests.helpers.concurrency import client_on_engine, wait, wait_for_lock_waiter
 from tests.helpers.contract import assert_contract
 
 ADMIN_TELEGRAM_ID = 500
@@ -767,3 +772,66 @@ async def test_put_eleven_ids_is_422(
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+@dataclass(frozen=True)
+class Crew:
+    event_id: uuid.UUID
+    transfer_id: uuid.UUID
+    application_ids: tuple[uuid.UUID, uuid.UUID, uuid.UUID]  # двое в трансфере и ждущий
+
+
+async def test_put_members_waits_for_participant_edit(app: FastAPI, db_engine: AsyncEngine) -> None:
+    """Правка участника под `lock_event` делает заявку несовместимой; PUT админа ждёт и видит её."""
+    sessions = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with sessions() as session:
+        admin = await make_user(session, telegram_id=ADMIN_TELEGRAM_ID, first_name="Ivan")
+        event = await make_event(session, admin_id=admin.id)
+        transfer = await make_transfer(session, event_id=event.id)
+        first = await app_at(session, event, transfer=transfer)
+        second = await app_at(session, event, transfer=transfer)
+        # прилёт на 10 минут раньше остальных, ожидание 15: подходит
+        waiting = await app_at(session, event, -10)
+        await session.commit()
+        crew = Crew(event.id, transfer.id, (first.id, second.id, waiting.id))
+        admin_id = admin.id
+        user_ids = [first.user_id, second.user_id, waiting.user_id]
+    try:
+        async with client_on_engine(app, sessions) as client, sessions() as rival:
+            await lock_event(rival, crew.event_id)
+            request = asyncio.ensure_future(
+                put_members(client, crew.event_id, crew.transfer_id, list(crew.application_ids))
+            )
+            try:
+                await wait_for_lock_waiter(sessions, request)
+                assert not request.done()
+                # участник правит заявку: ждать он больше не готов, а до самого позднего 10 минут
+                await rival.execute(
+                    update(Application)
+                    .where(Application.id == crew.application_ids[2])
+                    .values(max_wait_minutes=0)
+                )
+                await rival.commit()
+                response = await wait(request)
+            finally:
+                if not request.done():
+                    request.cancel()
+
+        assert response.status_code == 409
+        assert response.json()["error"]["code"] == "INCOMPATIBLE_TRANSFER"
+        async with sessions() as session:
+            rows = (
+                await session.execute(
+                    select(Application.id, Application.transfer_id).where(
+                        Application.event_id == crew.event_id
+                    )
+                )
+            ).all()
+            by_id = {row_id: transfer_id for row_id, transfer_id in rows}
+            assert by_id[crew.application_ids[2]] is None  # ждущая в трансфер не попала
+            assert by_id[crew.application_ids[0]] == crew.transfer_id
+    finally:
+        async with sessions() as session:
+            await session.execute(delete(Event).where(Event.id == crew.event_id))
+            await session.execute(delete(User).where(User.id.in_([admin_id, *user_ids])))
+            await session.commit()

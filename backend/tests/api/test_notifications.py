@@ -353,6 +353,31 @@ async def test_admin_edit_by_twenty_minutes_tells_passenger_and_mate_and_sets_ba
     assert set((await kinds(db_session, group, after=before)).values()) == {K.FLIGHT_CHANGED}
 
 
+@pytest.mark.parametrize(
+    ("local_time", "told"),
+    [
+        ("2026-11-12T08:19:59", False),  # +14:59
+        ("2026-11-12T08:20:00", True),  # +15:00
+        ("2026-11-12T07:50:00", True),  # -15:00
+        ("2026-11-12T07:50:01", False),  # -14:59
+    ],
+    ids=["plus_14_59", "plus_15_00", "minus_15_00", "minus_14_59"],
+)
+async def test_arrival_shift_threshold_boundary(
+    api_client: AsyncClient, db_session: AsyncSession, local_time: str, told: bool
+) -> None:
+    """Д10: сообщение при сдвиге на 15 минут и больше от сообщённого значения, в обе стороны."""
+    group, trip, passenger, mate = await _flight_group(db_session)  # прибытие 08:05 по Москве
+
+    response = await patch_trip(
+        api_client, trip.id, {"estimated_arrival": local_time}, ADMIN_TELEGRAM_ID
+    )
+
+    assert response.status_code == 200
+    expected = {passenger.user_id: K.FLIGHT_CHANGED, mate.user_id: K.FLIGHT_CHANGED}
+    assert await kinds(db_session, group) == (expected if told else {})
+
+
 async def test_repeated_edit_without_changes_makes_no_messages(
     api_client: AsyncClient, db_session: AsyncSession
 ) -> None:

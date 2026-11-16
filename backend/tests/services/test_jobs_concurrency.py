@@ -17,18 +17,23 @@ from httpx import AsyncClient
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from app.flights import FakeFlightProvider, ProviderFlight
 from app.models import (
     ActorKind,
     Application,
     ApplicationStatus,
     AuditAction,
+    AuditReason,
     BackgroundJob,
     Event,
     Trip,
+    TripSource,
+    TripStatus,
     User,
 )
 from app.schemas.trip import TripUpdate
-from app.services.audit import Actor
+from app.services.audit import Actor, record
+from app.services.flight_polling import PollResult, poll_due_trips
 from app.services.jobs import JobOutcome, enqueue_reconcile, process_next
 from app.services.matching import lock_event, match_application
 from app.services.trips import update_trip
@@ -212,6 +217,82 @@ async def test_patch_after_lock_release_enqueues_job_for_real_change(
     async with sessions() as session:
         (entry,) = await audit_rows(session, group.event_id)
         assert entry.action == "trip_updated"
+    assert await _job_count(sessions, group) == 1
+
+
+async def test_poll_waits_for_event_lock_then_rereads_trip(
+    sessions: async_sessionmaker[AsyncSession], group: Group
+) -> None:
+    now = datetime(2026, 11, 11, 8, 0, tzinfo=UTC)
+    async with sessions() as session:
+        trip = await session.get(Trip, group.trip_id)
+        assert trip is not None
+        trip.provider_ref = "ref-poll"
+        trip.source = TripSource.PROVIDER
+        trip.status = TripStatus.SCHEDULED
+        trip.next_poll_at = now - timedelta(minutes=1)
+        await make_application(
+            session, event_id=group.event_id, user_id=group.admin_id, trip_id=group.trip_id
+        )
+        await session.commit()
+        provider = FakeFlightProvider(
+            [
+                ProviderFlight(
+                    provider_ref="ref-poll",
+                    number=trip.number,
+                    departure_iata="SVX",
+                    arrival_iata="SVO",
+                    scheduled_departure=trip.scheduled_departure,
+                    scheduled_arrival=trip.scheduled_arrival,
+                    estimated_arrival=ARRIVAL + timedelta(minutes=40),
+                    status=TripStatus.SCHEDULED,
+                )
+            ]
+        )
+
+    async with sessions() as holder:
+        await lock_event(holder, group.event_id)
+        poll = asyncio.ensure_future(poll_due_trips(sessions, provider, now=now))
+        try:
+            await wait_for_lock_waiter(sessions, poll)
+            # пока опрос ждёт группу, админ правит рейс (как `update_trip`, но без commit)
+            await holder.execute(
+                update(Trip)
+                .where(Trip.id == group.trip_id)
+                .values(estimated_arrival=ESTIMATE, source=TripSource.MANUAL)
+            )
+            record(
+                holder,
+                event_id=group.event_id,
+                action=AuditAction.TRIP_UPDATED,
+                actor=Actor(ActorKind.ADMIN, group.admin_id),
+                reason=AuditReason.ADMIN_EDIT,
+                trip_id=group.trip_id,
+                details={
+                    "changed_fields": ["estimated_arrival"],
+                    "effective_arrival_before": ARRIVAL.isoformat(),
+                    "effective_arrival_after": ESTIMATE.isoformat(),
+                },
+            )
+            await holder.commit()
+            result = await wait(poll)
+        finally:
+            if not poll.done():
+                poll.cancel()
+
+    # рейс перечитан после блокировки: значение поставщика отличается от правки админа и побеждает
+    assert result == PollResult(polled=1, changed=1)
+    async with sessions() as session:
+        stored = await session.get(Trip, group.trip_id, populate_existing=True)
+        assert stored is not None
+        assert stored.estimated_arrival == ARRIVAL + timedelta(minutes=40)
+        assert stored.source == TripSource.PROVIDER
+        rows = await audit_rows(session, group.event_id)
+        assert [(r.action, r.reason, r.actor_kind) for r in rows] == [
+            (AuditAction.TRIP_UPDATED, AuditReason.ADMIN_EDIT, ActorKind.ADMIN),
+            (AuditAction.TRIP_UPDATED, AuditReason.PROVIDER_UPDATE, ActorKind.SYSTEM),
+        ]
+        assert rows[1].details["effective_arrival_before"] == ESTIMATE.isoformat()
     assert await _job_count(sessions, group) == 1
 
 

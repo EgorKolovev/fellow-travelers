@@ -192,11 +192,19 @@ async def run_jobs(s: AsyncSession) -> int:
     return done
 
 
-async def set_departed_at(s: AsyncSession, application_id: str, moment: datetime) -> None:
+async def set_departed_at(
+    s: AsyncSession,
+    application_id: str,
+    moment: datetime | None = None,
+    *,
+    ago: timedelta | None = None,
+) -> None:
+    """Время «Уехал»: `ago` назад по часам БД (как считает окно код) или заданный `moment`."""
+    value = func.now() - ago if ago is not None else moment
     await s.execute(
         update(Application)
         .where(Application.id == uuid.UUID(application_id))
-        .values(departed_at=moment)
+        .values(departed_at=value)
     )
     s.expire_all()
 
@@ -626,14 +634,14 @@ async def test_step5_undo_departure_window_and_departed_not_matched(
     # отмена в пределах 30 минут: заявка возвращается в трансфер
     gone = await mark(c, s, event_id, a, departed=True)
     app_id = gone.json()["id"]
-    await set_departed_at(s, app_id, datetime.now(UTC) - timedelta(minutes=29))
+    await set_departed_at(s, app_id, ago=timedelta(minutes=29))
     back = await mark(c, s, event_id, a, departed=False)
     assert back.json()["departed_at"] is None
     assert (back.json()["status"], back.json()["transfer_id"]) == ("assigned", transfer_id)
 
     # через 31 минуту: отмена и любая правка заявки отклоняются
     await mark(c, s, event_id, a, departed=True)
-    await set_departed_at(s, app_id, datetime.now(UTC) - timedelta(minutes=31))
+    await set_departed_at(s, app_id, ago=timedelta(minutes=31))
     late = await call(
         c,
         "PUT",
@@ -878,6 +886,47 @@ async def test_step6_cancelled_flight_removes_passengers_and_they_are_not_matche
     (transfer,) = await admin_transfers(c, event_id)
     assert member_names(transfer) == sorted([boris.name, carol.name])
     assert (await my_application(c, event_id, alice))["transfer_id"] is None
+
+
+@pytest.mark.parametrize(
+    ("with_carol", "stay_kind"), [(True, "transfer_changed"), (False, "transfer_left")]
+)
+async def test_step8_cancellation_messages_across_poll_and_reconcile(
+    api_client: AsyncClient,
+    db_session: AsyncSession,
+    provider: FakeFlightProvider,
+    with_carol: bool,
+    stay_kind: str,
+) -> None:
+    """Опрос видит отмену, задание пересчёта выводит пассажира рейса из трансфера (Д8).
+
+    Ему `flight_cancelled`, оставшимся — `transfer_changed` (трое → двое) или `transfer_left`
+    (пара).
+    """
+    c, s = api_client, db_session
+    event_id, code = await create_event(c, "Сообщения об отмене", pickup_point=PICKUP)
+    alice, boris, carol = crew(3, 3850)
+    await join_all(c, s, [alice, boris, carol], code)
+    (trip,) = (await search(c, alice, event_id)).json()
+    manual = await add_trip(c, event_id, "SVO", "2026-11-12T10:00:00", "SU 851")
+    await apply(c, s, event_id, alice, trip["id"], wait=15)
+    await apply(c, s, event_id, boris, manual, wait=15)
+    if with_carol:
+        await apply(c, s, event_id, carol, manual, wait=15)
+    (transfer,) = await admin_transfers(c, event_id)
+    assert len(transfer["members"]) == (3 if with_carol else 2)
+    mark_id = await last_id(s, event_id)
+
+    provider.add(flight(status=TripStatus.CANCELLED))
+    result = await poll(s, provider, datetime(2026, 11, 11, 12, 0, tzinfo=UTC), trip["id"])
+    assert result.changed == 1
+    assert await run_jobs(s) >= 1
+
+    expected = {alice.telegram_id: "flight_cancelled", boris.telegram_id: stay_kind}
+    if with_carol:
+        expected[carol.telegram_id] = stay_kind
+    assert await kinds(s, event_id, after=mark_id) == expected
+    await assert_invariants(s, uuid.UUID(event_id))
 
 
 # ---------------------------------------------------------------- шаг 7

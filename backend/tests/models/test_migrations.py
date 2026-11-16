@@ -1,5 +1,10 @@
 import asyncio
+import re
+import uuid
+from datetime import UTC, datetime
+from pathlib import Path
 
+import pytest
 from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
@@ -7,9 +12,15 @@ from sqlalchemy import inspect, select, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from app.models import Application, Base
+from app.models import (
+    Application,
+    AuditReason,
+    Base,
+    Notification,
+    NotificationKind,
+)
 from tests.db import alembic_config, migrate_from_scratch
-from tests.factories import make_application, make_audit_log
+from tests.factories import make_application, make_audit_log, make_event, make_trip, make_user
 
 
 def _diff(connection: Connection) -> list[object]:
@@ -170,5 +181,114 @@ async def test_0007_adds_and_drops_departed_from_transfer_without_fk(
         await db_engine.dispose()
         assert await _departed_from_transfer_column(db_engine) == {"nullable": True}
     finally:
+        await asyncio.to_thread(migrate_from_scratch, migrated_database)
+        await db_engine.dispose()
+
+
+README = Path(__file__).resolve().parents[2] / "README.md"
+
+
+def _documented_cleanup_sql() -> str:
+    """SQL подготовки отката релиза MVP ровно как в README (между `<<'SQL'` и `SQL`)."""
+    match = re.search(
+        r"psql -U fellow -d fellow_travelers <<'SQL'\n(.*?)\n\s*SQL\n", README.read_text(), re.S
+    )
+    assert match is not None, "в README нет SQL отката релиза MVP"
+    sql = "\n".join(line.strip() for line in match.group(1).splitlines())
+    assert "audit_log_append_only" in sql
+    assert "UPDATE audit_log SET reason = NULL" in sql
+    return sql
+
+
+async def _run_documented_cleanup(engine: AsyncEngine) -> None:
+    """Выполняет SQL из README по операторам в одной транзакции (BEGIN/COMMIT даёт `begin`)."""
+    statements = [part.strip() for part in _documented_cleanup_sql().split(";")]
+    async with engine.begin() as connection:
+        for statement in statements:
+            if statement and statement not in {"BEGIN", "COMMIT"}:
+                await connection.execute(text(statement))
+
+
+async def test_downgrade_to_0004_with_mvp_data_after_documented_cleanup(
+    db_engine: AsyncEngine, migrated_database: str
+) -> None:
+    # Given: на head есть данные MVP: история с причиной MVP, уведомление, рейс с опросом,
+    # заявка с departed_from_transfer_id
+    async with AsyncSession(db_engine) as session:
+        event = await make_event(session)
+        user = await make_user(session)
+        trip = await make_trip(
+            session,
+            event_id=event.id,
+            provider_ref="ref-1",
+            next_poll_at=datetime(2026, 11, 11, 8, 0, tzinfo=UTC),
+        )
+        application = await make_application(
+            session,
+            event_id=event.id,
+            user_id=user.id,
+            trip_id=trip.id,
+            departed_from_transfer_id=uuid.uuid4(),
+        )
+        entry = await make_audit_log(
+            session, event_id=event.id, reason=AuditReason.PROVIDER_UPDATE, trip_id=trip.id
+        )
+        session.add(
+            Notification(
+                user_id=user.id,
+                event_id=event.id,
+                kind=NotificationKind.TRANSFER_CHANGED,
+                payload={"event_id": str(event.id)},
+                dedupe_key="k1",
+            )
+        )
+        entry_id, application_id = entry.id, application.id
+        await session.commit()
+    try:
+        # When: откат без подготовки — Then: падает на CHECK, схема остаётся прежней
+        with pytest.raises(Exception, match="ck_audit_log_audit_reason"):
+            await asyncio.to_thread(command.downgrade, alembic_config(), "0004")
+        await db_engine.dispose()
+        async with db_engine.connect() as connection:
+            assert await connection.scalar(text("SELECT to_regclass('notifications') IS NOT NULL"))
+
+        # When: ровно SQL из README, затем откат
+        await _run_documented_cleanup(db_engine)
+        await asyncio.to_thread(command.downgrade, alembic_config(), "0004")
+        await db_engine.dispose()
+
+        # Then: строка истории осталась с reason NULL, триггер на месте, таблицы MVP нет
+        async with db_engine.connect() as connection:
+            assert await connection.scalar(text("SELECT to_regclass('notifications') IS NULL"))
+            row = (
+                await connection.execute(
+                    text("SELECT reason, event_id FROM audit_log WHERE id = :id"), {"id": entry_id}
+                )
+            ).one()
+            assert row.reason is None
+            assert (
+                await connection.scalar(
+                    text("SELECT count(*) FROM applications WHERE id = :id"), {"id": application_id}
+                )
+                == 1
+            )
+        _, triggers, _ = await _audit_log_objects(db_engine)
+        assert triggers == {"audit_log_append_only", "audit_log_no_truncate"}
+        assert await _departed_from_transfer_column(db_engine) is None
+
+        # When: снова upgrade head — Then: проходит, строка истории на месте
+        await asyncio.to_thread(command.upgrade, alembic_config(), "head")
+        await db_engine.dispose()
+        async with db_engine.connect() as connection:
+            assert (
+                await connection.scalar(
+                    text("SELECT count(*) FROM audit_log WHERE id = :id AND reason IS NULL"),
+                    {"id": entry_id},
+                )
+                == 1
+            )
+    finally:
+        # упавший тест мог оставить причины MVP в истории: без очистки `downgrade base` упадёт
+        await _run_documented_cleanup(db_engine)
         await asyncio.to_thread(migrate_from_scratch, migrated_database)
         await db_engine.dispose()

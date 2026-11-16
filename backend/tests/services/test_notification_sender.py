@@ -530,3 +530,31 @@ async def test_store_result_failure_does_not_stop_the_pass(
     assert "ConnectionRefusedError" in record.getMessage()
     assert "secret-detail" not in record.getMessage()
     assert record.notification_id == ids[0]  # type: ignore[attr-defined]
+
+
+async def test_locked_row_is_skipped_not_waited(
+    sessions: async_sessionmaker[AsyncSession], group: Group
+) -> None:
+    locked_id = await _add(sessions, group)
+    free_id = await _add(sessions, group)
+    sender = FakeSender()
+
+    async with sessions() as holder:
+        held = await holder.scalars(
+            select(Notification.id).where(Notification.id == locked_id).with_for_update()
+        )
+        assert held.all() == [locked_id]
+
+        result = await asyncio.wait_for(send_due(sessions, sender, now=NOW), 3)
+
+        assert result.sent == 1  # взята только свободная строка, проход не ждал держателя
+        assert len(sender.calls) == 1
+        async with sessions() as reader:
+            rows = await reader.execute(select(Notification.id, Notification.status))
+            statuses = {row_id: status for row_id, status in rows.all()}
+        assert statuses[free_id] == NotificationStatus.SENT
+        assert statuses[locked_id] == NotificationStatus.PENDING
+        await holder.rollback()
+
+    again = await asyncio.wait_for(send_due(sessions, sender, now=NOW), 3)
+    assert again.sent == 1  # после отпускания блокировки строка A уходит

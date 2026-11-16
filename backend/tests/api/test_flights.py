@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import uuid
 from collections.abc import Iterator
@@ -7,16 +8,17 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from httpx import AsyncClient, Response
-from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import delete, func, select, update
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.api.deps import get_flight_provider
 from app.flights import FakeFlightProvider, FlightProvider, ProviderFlight
 from app.models import BackgroundJob, Event, Trip, TripSource, TripStatus, User
 from app.services import flights as flights_service
 from tests.api.conftest import auth_headers
-from tests.factories import get_location, make_event, make_membership, make_trip
+from tests.factories import get_location, make_event, make_membership, make_trip, make_user
 from tests.helpers.audit_replay import audit_rows
+from tests.helpers.concurrency import client_on_engine, wait
 from tests.helpers.contract import assert_contract
 
 DAY = date(2026, 11, 12)
@@ -379,3 +381,72 @@ async def test_connection_is_released_while_waiting_for_provider(
 
     assert response.status_code == 200
     assert in_transaction == [False]
+
+
+async def test_research_of_uncancelled_flight_restarts_polling(
+    api_client: AsyncClient, db_session: AsyncSession, event: Event, fake: FakeFlightProvider
+) -> None:
+    fake.add(provider_flight(status=TripStatus.CANCELLED))
+    (first,) = (await search(api_client, event.id)).json()
+    # воркер прекращает опрос отменённого рейса (Д2)
+    await db_session.execute(
+        update(Trip).where(Trip.id == uuid.UUID(first["id"])).values(next_poll_at=None)
+    )
+    await db_session.commit()
+    fake.add(provider_flight(status=TripStatus.DELAYED))  # «отмена отмены»
+
+    (second,) = (await search(api_client, event.id)).json()
+
+    assert second["id"] == first["id"]
+    assert second["status"] == "delayed"
+    [stored] = await trips_in(db_session, event.id)
+    await db_session.refresh(stored)
+    assert stored.next_poll_at is not None
+    assert abs(stored.next_poll_at - datetime.now(UTC)) < timedelta(minutes=1)
+
+
+async def test_concurrent_searches_make_one_trip(app: FastAPI, db_engine: AsyncEngine) -> None:
+    """Два параллельных поиска одного рейса: блокировка группы даёт один рейс и один id."""
+    sessions = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with sessions() as session:
+        admin = await make_user(session, telegram_id=7_300_001, first_name="Ivan")
+        event = await make_event(session, admin_id=admin.id)
+        await session.commit()
+        event_id, admin_id = event.id, admin.id
+    # задержка поставщика: оба запроса уже в поиске, когда первый берёт блокировку группы
+    provider = FakeFlightProvider([provider_flight()], delay=0.2)
+    app.dependency_overrides[get_flight_provider] = lambda: provider
+    try:
+        async with client_on_engine(app, sessions) as client:
+            # client_on_engine очищает переопределения при выходе, поэтому ставим их заново
+            app.dependency_overrides[get_flight_provider] = lambda: provider
+            responses = await wait(
+                asyncio.gather(
+                    *(
+                        client.get(
+                            "/flights/search",
+                            params={
+                                "event_id": str(event_id),
+                                "number": "su 1234",
+                                "date": "2026-11-12",
+                            },
+                            headers=auth_headers(7_300_001),
+                        )
+                        for _ in range(2)
+                    )
+                )
+            )
+        for response in responses:
+            assert_contract(response, "GET", "/flights/search")
+            assert response.status_code == 200
+        ids = {body["id"] for response in responses for body in response.json()}
+        assert len(ids) == 1
+        async with sessions() as session:
+            stored = (await session.scalars(select(Trip).where(Trip.event_id == event_id))).all()
+            assert [str(trip.id) for trip in stored] == list(ids)
+    finally:
+        app.dependency_overrides.pop(get_flight_provider, None)
+        async with sessions() as session:
+            await session.execute(delete(Event).where(Event.id == event_id))
+            await session.execute(delete(User).where(User.id == admin_id))
+            await session.commit()

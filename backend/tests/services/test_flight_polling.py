@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from prometheus_client import REGISTRY
 from sqlalchemy import delete, func, select, update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.flights import FakeFlightProvider, ProviderFlight, polling
@@ -29,11 +30,12 @@ from app.models import (
 from app.services import flight_polling
 from app.services.flight_polling import (
     ERROR_RETRY,
+    LEASE,
     UNAVAILABLE_RETRY,
     PollResult,
     poll_due_trips,
 )
-from tests.factories import make_application, make_event, make_trip, make_user
+from tests.factories import make_application, make_event, make_transfer, make_trip, make_user
 from tests.helpers.audit_replay import audit_rows
 from tests.helpers.concurrency import wait
 
@@ -124,12 +126,18 @@ async def _trip(
         if application is not None:
             user = await make_user(session)
             group.user_ids.append(user.id)
+            transfer = (
+                await make_transfer(session, event_id=group.event_id)
+                if application == ApplicationStatus.ASSIGNED
+                else None
+            )
             await make_application(
                 session,
                 event_id=group.event_id,
                 trip_id=trip.id,
                 user_id=user.id,
                 status=application,
+                transfer_id=transfer.id if transfer is not None else None,
                 departed_at=NOW if departed else None,
             )
         await session.commit()
@@ -428,3 +436,163 @@ async def test_parallel_passes_do_not_poll_same_trip_twice(
 
     assert sorted(provider.fetched) == [f"ref-SU000{i}" for i in range(4)]
     assert [r.polled for r in results] == [2, 2]
+
+
+async def test_locked_trip_is_skipped_not_waited(
+    sessions: async_sessionmaker[AsyncSession], group: Group
+) -> None:
+    locked = await _trip(sessions, group, "SU0001")
+    free = await _trip(sessions, group, "SU0002")
+    provider = CountingProvider([_flight("ref-SU0001", "SU0001"), _flight("ref-SU0002", "SU0002")])
+
+    async with sessions() as holder:
+        held = await holder.scalars(select(Trip.id).where(Trip.id == locked).with_for_update())
+        assert held.all() == [locked]
+
+        result = await asyncio.wait_for(poll_due_trips(sessions, provider, now=NOW), 3)
+
+        assert result.polled == 1  # рейс A занят другой сессией: проход берёт только B и не ждёт
+        assert provider.fetched == ["ref-SU0002"]
+        assert (await _load(sessions, free)).last_polled_at == NOW
+        assert (await _load(sessions, locked)).last_polled_at is None
+        await holder.rollback()
+
+    again = await asyncio.wait_for(poll_due_trips(sessions, provider, now=NOW), 3)
+    assert again.polled == 1
+    assert provider.fetched == ["ref-SU0002", "ref-SU0001"]
+
+
+async def test_apply_update_operational_error_pauses_trip_and_logs_class_only(
+    sessions: async_sessionmaker[AsyncSession],
+    group: Group,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trip_id = await _trip(sessions, group, "SU0001")
+    secret = "password=hunter2 host=db.internal"
+
+    async def broken(*args: object, **kwargs: object) -> bool:
+        raise OperationalError("SELECT secret_column", {"p": "SU0001"}, Exception(secret))
+
+    monkeypatch.setattr(flight_polling, "apply_update", broken)
+    provider = CountingProvider(
+        [_flight("ref-SU0001", "SU0001", estimated_arrival=ARR + timedelta(minutes=30))]
+    )
+    caplog.set_level(logging.ERROR)
+    before = _counter("error")
+
+    result = await poll_due_trips(sessions, provider, now=NOW)
+
+    assert result.polled == 1
+    assert _counter("error") == before + 1
+    trip = await _load(sessions, trip_id)
+    assert trip.next_poll_at == NOW + ERROR_RETRY
+    assert trip.last_polled_at is None
+    assert trip.estimated_arrival is None
+    (record,) = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert "OperationalError" in record.getMessage()
+    assert not record.exc_info
+    text = " ".join([record.getMessage(), str(record.args), str(getattr(record, "trip_id", ""))])
+    assert "hunter2" not in text
+    assert "secret_column" not in text
+    assert "SU0001" not in text
+
+
+async def test_failed_pause_write_keeps_lease_and_logs_error(
+    sessions: async_sessionmaker[AsyncSession],
+    group: Group,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trip_id = await _trip(sessions, group, "SU0001")
+
+    async def broken_retry(*args: object, **kwargs: object) -> None:
+        raise OperationalError("UPDATE trips", {}, Exception("connection lost"))
+
+    monkeypatch.setattr(flight_polling, "_store_retry", broken_retry)
+    provider = FailingProvider("ref-SU0001")
+    caplog.set_level(logging.ERROR)
+
+    result = await poll_due_trips(sessions, provider, now=NOW)
+
+    assert result.polled == 1
+    # пауза не записана: рейс остаётся на аренде и вернётся в опрос, когда она истечёт
+    assert (await _load(sessions, trip_id)).next_poll_at == NOW + LEASE
+    messages = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(messages) == 2
+    assert "RuntimeError" in messages[0]
+    assert "OperationalError" in messages[1]
+    assert all("connection lost" not in m and "SU0001" not in m for m in messages)
+
+
+class DetachingProvider(CountingProvider):
+    """Пока идёт запрос к поставщику, рейс отвязывают (как удаление или смена рейса)."""
+
+    def __init__(
+        self, sessions: async_sessionmaker[AsyncSession], trip_id: uuid.UUID, *args: object
+    ) -> None:
+        super().__init__(*args)
+        self.sessions = sessions
+        self.trip_id = trip_id
+
+    async def fetch(self, provider_ref: str) -> ProviderFlight | None:
+        async with self.sessions() as session:
+            await session.execute(
+                update(Trip).where(Trip.id == self.trip_id).values(provider_ref=None)
+            )
+            await session.commit()
+        return await super().fetch(provider_ref)
+
+
+async def test_trip_detached_during_request_stays_on_lease_without_changes(
+    sessions: async_sessionmaker[AsyncSession], group: Group
+) -> None:
+    trip_id = await _trip(sessions, group, "SU0001")
+    provider = DetachingProvider(
+        sessions,
+        trip_id,
+        [_flight("ref-SU0001", "SU0001", estimated_arrival=ARR + timedelta(minutes=30))],
+    )
+
+    result = await poll_due_trips(sessions, provider, now=NOW)
+
+    assert result == PollResult(polled=1)
+    trip = await _load(sessions, trip_id)
+    assert trip.provider_ref is None
+    assert trip.next_poll_at == NOW + LEASE  # ответ не применён, расписание не пересчитано
+    assert trip.last_polled_at is None
+    assert trip.estimated_arrival is None
+    async with sessions() as session:
+        assert await audit_rows(session, group.event_id) == []
+
+
+async def test_polls_trip_with_assigned_application_and_skips_all_departed(
+    sessions: async_sessionmaker[AsyncSession], group: Group
+) -> None:
+    """Д3: рейс с `assigned` опрашивается; рейс, где все заявки уехали, — нет; смешанный — да."""
+    assigned = await _trip(sessions, group, "SU0001", application=ApplicationStatus.ASSIGNED)
+    all_departed = await _trip(
+        sessions, group, "SU0002", application=ApplicationStatus.ASSIGNED, departed=True
+    )
+    mixed = await _trip(sessions, group, "SU0003", application=ApplicationStatus.ASSIGNED)
+    async with sessions() as session:  # на смешанном рейсе вторая заявка уехала
+        user = await make_user(session)
+        group.user_ids.append(user.id)
+        await make_application(
+            session,
+            event_id=group.event_id,
+            trip_id=mixed,
+            user_id=user.id,
+            status=ApplicationStatus.SOLO,
+            departed_at=NOW,
+        )
+        await session.commit()
+    provider = CountingProvider([_flight(f"ref-SU000{i}", f"SU000{i}") for i in (1, 2, 3)])
+
+    result = await poll_due_trips(sessions, provider, now=NOW)
+
+    assert result.polled == 2
+    assert sorted(provider.fetched) == ["ref-SU0001", "ref-SU0003"]
+    assert (await _load(sessions, assigned)).last_polled_at == NOW
+    assert (await _load(sessions, mixed)).last_polled_at == NOW
+    assert (await _load(sessions, all_departed)).last_polled_at is None

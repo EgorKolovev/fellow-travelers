@@ -401,7 +401,7 @@ async def _undo_departure(session: AsyncSession, application: Application, actor
 async def _within_undo_window(session: AsyncSession, application: Application) -> bool:
     """Отмена «Уехал» ещё возможна; окно считает БД: `departed_at` тоже поставлен её `now()`."""
     within = await session.scalar(
-        select(Application.departed_at > func.now() - UNDO_DEPARTURE_WINDOW).where(
+        select(Application.departed_at >= func.now() - UNDO_DEPARTURE_WINDOW).where(
             Application.id == application.id
         )
     )
