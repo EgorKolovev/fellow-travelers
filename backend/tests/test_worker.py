@@ -12,6 +12,7 @@ import time
 from typing import Any
 
 import pytest
+from aiogram.utils.token import TokenValidationError
 from prometheus_client import REGISTRY
 
 import app.worker as worker
@@ -421,7 +422,11 @@ async def test_flight_polling_loop_exits_at_once_when_stopped(
     assert script.calls == 0
 
 
-async def _run_main(monkeypatch: pytest.MonkeyPatch, provider: object | None) -> list[str]:
+async def _run_main(
+    monkeypatch: pytest.MonkeyPatch,
+    provider: object | None,
+    bot_builder: Any = None,
+) -> list[str]:
     events: list[str] = []
 
     class FakeServer:
@@ -442,6 +447,8 @@ async def _run_main(monkeypatch: pytest.MonkeyPatch, provider: object | None) ->
     monkeypatch.setattr(worker_main, "run", fake_run)
     _fake_notifications(monkeypatch, events)
     monkeypatch.setattr(worker_main, "run_flight_polling", fake_polling)
+    if bot_builder is not None:
+        monkeypatch.setattr(worker_main, "build_bot", bot_builder)
     monkeypatch.setattr(worker_main, "build_provider", lambda settings: provider)
     monkeypatch.setattr(worker_main, "dispose_engine", fake_dispose)
     monkeypatch.setattr(worker_main, "configure_logging", lambda level: None)
@@ -471,6 +478,25 @@ async def test_main_skips_flight_polling_without_provider(
         r.name == "app.worker" and r.levelno == logging.INFO and "опрос рейсов" in r.getMessage()
         for r in caplog.records
     )
+
+
+async def test_main_survives_malformed_bot_token_without_notifications(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    secret = "not-a-token-SECRET"
+    caplog.set_level(logging.INFO)
+
+    def failing_build_bot(settings: object) -> object:
+        raise TokenValidationError(f"Token is invalid! {secret}")
+
+    events = await _run_main(monkeypatch, object(), bot_builder=failing_build_bot)
+
+    assert sorted(events) == ["polling", "run"]
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert [r.getMessage() for r in warnings] == [
+        "Уведомления не отправляются: BOT_TOKEN не похож на токен Telegram"
+    ]
+    assert secret not in caplog.text
 
 
 # ---------------------------------------------------------------- отправка уведомлений

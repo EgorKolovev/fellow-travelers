@@ -2,6 +2,7 @@ import asyncio
 import logging
 import signal
 
+from aiogram.utils.token import TokenValidationError
 from prometheus_client import start_http_server
 
 from app.bot.session import build_bot
@@ -33,10 +34,17 @@ async def main() -> None:
     # метрики отдаёт отдельный поток; порт не публикуется наружу, его читают из сети compose
     metrics_server, _ = start_http_server(settings.worker_metrics_port)
     logger.info("Воркер запущен, метрики на порту %d", settings.worker_metrics_port)
-    bot = build_bot(settings)
+    try:
+        bot = build_bot(settings)
+    except TokenValidationError:
+        # токен в предупреждение не попадает: ни целиком, ни частями
+        logger.warning("Уведомления не отправляются: BOT_TOKEN не похож на токен Telegram")
+        bot = None
     try:
         provider = build_provider(settings)
-        loops = [run(stop), run_notification_sender(stop, TelegramSender(bot))]
+        loops = [run(stop)]
+        if bot is not None:
+            loops.append(run_notification_sender(stop, TelegramSender(bot)))
         if provider is None:
             logger.info("Поставщик рейсов не настроен: опрос рейсов не запускается")
         else:
@@ -47,7 +55,8 @@ async def main() -> None:
             logger.info("Удаление данных выключено")
         await asyncio.gather(*loops)
     finally:
-        await bot.session.close()
+        if bot is not None:
+            await bot.session.close()
         metrics_server.shutdown()
         await dispose_engine()
         logger.info("Воркер остановлен")

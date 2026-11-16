@@ -105,7 +105,8 @@ UPDATE background_jobs SET status = 'pending', attempts = 0, run_after = now() W
 - **Отправка уведомлений** через бота раз в 5 секунд. Строки `notifications` создаются при commit изменений;
   воркер отправляет их и ставит `sent`, `skipped` (пользователь не писал боту или заблокировал его) или,
   после 8 неудач, `failed`. Воркеру нужны `BOT_TOKEN`, `BOT_USERNAME` и, если ВМ не видит Telegram,
-  `TELEGRAM_RELAY_URL` и `TELEGRAM_RELAY_SECRET` (`docs/telegram-relay.md`). Метрика —
+  `TELEGRAM_RELAY_URL` и `TELEGRAM_RELAY_SECRET` (`docs/telegram-relay.md`). Без настоящего `BOT_TOKEN` воркер работает, но уведомления не
+  отправляет. Метрика —
   `ft_notifications_total{kind,outcome}`.
 - **Удаление данных** раз в час, только при `RETENTION_ENABLED=true`. Группа удаляется целиком через 7 суток
   после позднего из «конец дня `ends_on`» и последней отметки «Уехал». Удаление необратимо; пользователи
