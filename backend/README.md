@@ -109,7 +109,8 @@ UPDATE background_jobs SET status = 'pending', attempts = 0, run_after = now() W
   отправляет. Метрика —
   `ft_notifications_total{kind,outcome}`.
 - **Удаление данных** раз в час, только при `RETENTION_ENABLED=true`. Группа удаляется целиком через 7 суток
-  после позднего из «конец дня `ends_on`» и последней отметки «Уехал». Удаление необратимо; пользователи
+  после самого позднего из моментов: конец дня `ends_on`, последняя отметка «Уехал», создание и последняя
+  правка группы. Удаление необратимо; пользователи
   остаются.
 
 В проде `FLIGHT_PROVIDER` и `RETENTION_ENABLED` пока не задаются: деплой (`.github/workflows/deploy.yml`)
