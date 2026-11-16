@@ -50,6 +50,9 @@ class Application(TimestampMixin, Base):
     )
     at_meeting_point: Mapped[bool] = mapped_column(server_default=false())
     departed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # трансфер, из которого заявка уехала (Д7); без FK: при расформировании трансфер удаляется,
+    # а по этому полю при отмене «Уехал» понятно, что трансфера уже нет
+    departed_from_transfer_id: Mapped[uuid.UUID | None] = mapped_column()
 
     trip: Mapped[Trip] = relationship(lazy="raise")
     user: Mapped[User] = relationship(lazy="raise")

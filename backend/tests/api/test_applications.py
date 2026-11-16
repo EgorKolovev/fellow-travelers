@@ -1306,7 +1306,7 @@ async def test_marks_departed_false_without_departure_is_noop(
 
 @pytest.mark.parametrize(
     "payload",
-    [{"departed": False}, {"at_meeting_point": True}, {"at_meeting_point": False}],
+    [{"at_meeting_point": True}, {"at_meeting_point": False}],
 )
 async def test_marks_after_departure_conflict(
     api_client: AsyncClient, db_session: AsyncSession, event: Event, payload: dict[str, Any]

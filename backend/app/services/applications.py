@@ -1,6 +1,7 @@
 import uuid
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -13,6 +14,8 @@ from app.models import (
     AuditAction,
     AuditReason,
     Event,
+    Transfer,
+    TransferStatus,
     Trip,
     User,
 )
@@ -31,6 +34,9 @@ from app.services.matching import (
 )
 
 _FOREIGN_KEY_VIOLATION = "23503"
+
+# Д7: ошибочное «Уехал» можно отменить в течение этого времени после отметки
+UNDO_DEPARTURE_WINDOW = timedelta(minutes=30)
 
 TRIP_NOT_FOUND = "Рейс не найден"
 
@@ -307,6 +313,77 @@ async def cancel_my_application(session: AsyncSession, event: Event, user: User)
     return await _finish(session, event, user)
 
 
+async def mark_departed(
+    session: AsyncSession,
+    application: Application,
+    *,
+    actor: Actor,
+    reason: AuditReason | None = None,
+    close_transfer: bool = True,
+) -> None:
+    """Ставит заявке «Уехал» и пишет `marks_changed`; без commit. Заявка не должна быть уехавшей.
+
+    Запоминает трансфер, из которого заявка уехала (Д7). Статус и состав трансфера не меняются.
+    Если `close_transfer` и все участники трансфера уехали, он получает `departed`.
+    """
+    transfer_id = application.transfer_id
+    application.departed_at = func.now()
+    application.departed_from_transfer_id = transfer_id
+    record(
+        session,
+        event_id=application.event_id,
+        action=AuditAction.MARKS_CHANGED,
+        actor=actor,
+        reason=reason,
+        application=application,
+        details={"at_meeting_point": application.at_meeting_point, "departed": True},
+    )
+    await session.flush()
+    if close_transfer and transfer_id is not None and await all_departed(session, transfer_id):
+        await mark_transfer_departed(session, application.event_id, transfer_id, actor)
+
+
+async def _undo_departure(session: AsyncSession, application: Application, actor: Actor) -> None:
+    """Отмена «Уехал» по Д7: назад в трансфер, если он есть, иначе в поиск; без commit."""
+    from_transfer_id = application.departed_from_transfer_id
+    application.departed_at = None
+    application.departed_from_transfer_id = None
+    record(
+        session,
+        event_id=application.event_id,
+        action=AuditAction.MARKS_CHANGED,
+        actor=actor,
+        reason=AuditReason.DEPARTURE_UNDONE,
+        application=application,
+        details={"at_meeting_point": application.at_meeting_point, "departed": False},
+    )
+    transfer_id = application.transfer_id
+    if from_transfer_id is None:
+        # уезжал не из трансфера: статус прежний, поиск продолжается, если он был
+        needs_match = application.status == ApplicationStatus.SEARCHING
+    elif transfer_id is not None:
+        # заявка осталась в трансфере: он снова активен, если из-за неё считался уехавшим
+        await session.execute(
+            update(Transfer)
+            .where(Transfer.id == transfer_id, Transfer.status == TransferStatus.DEPARTED)
+            .values(status=TransferStatus.ACTIVE)
+        )
+        needs_match = False
+    else:
+        # трансфер распался, пока заявка ехала «сама»: снова в поиск
+        _change_status(
+            session,
+            application,
+            ApplicationStatus.SEARCHING,
+            actor=actor,
+            reason=AuditReason.DEPARTURE_UNDONE,
+        )
+        needs_match = True
+    await session.flush()
+    if needs_match:
+        await match_application(session, application, trigger=MatchTrigger.APPLICATION)
+
+
 async def set_my_marks(
     session: AsyncSession, event: Event, user: User, data: MarksInput
 ) -> Application:
@@ -314,10 +391,15 @@ async def set_my_marks(
     if application.status == ApplicationStatus.CANCELLED:
         raise AppError(ErrorCode.APPLICATION_LOCKED, "Участие отменено", 409)
     if application.departed_at is not None:
-        # повтор «Уехал» идемпотентен, любое изменение — нет; момент отъезда не меняется
-        if data.departed is True and "at_meeting_point" not in data.model_fields_set:
+        # повтор «Уехал» идемпотентен и момент отъезда не меняет; отмена — только в окне Д7
+        if "at_meeting_point" in data.model_fields_set:
+            raise _already_departed()
+        if data.departed is True:
             return await _finish(session, event, user)
-        raise _already_departed()
+        if datetime.now(UTC) - application.departed_at > UNDO_DEPARTURE_WINDOW:
+            raise _already_departed()
+        await _undo_departure(session, application, _participant(user))
+        return await _finish(session, event, user)
     meeting_changed = (
         data.at_meeting_point is not None and data.at_meeting_point != application.at_meeting_point
     )
@@ -325,8 +407,8 @@ async def set_my_marks(
         application.at_meeting_point = data.at_meeting_point
     departing = bool(data.departed)
     if departing:
-        application.departed_at = func.now()
-    if meeting_changed or departing:
+        await mark_departed(session, application, actor=_participant(user))
+    elif meeting_changed:
         # отметка, не изменившая состояние, в историю не попадает
         record(
             session,
@@ -334,11 +416,6 @@ async def set_my_marks(
             action=AuditAction.MARKS_CHANGED,
             actor=_participant(user),
             application=application,
-            details={"at_meeting_point": application.at_meeting_point, "departed": departing},
+            details={"at_meeting_point": application.at_meeting_point, "departed": False},
         )
-    if departing:
-        await session.flush()
-        transfer_id = application.transfer_id
-        if transfer_id is not None and await all_departed(session, transfer_id):
-            await mark_transfer_departed(session, event.id, transfer_id, _participant(user))
     return await _finish(session, event, user)

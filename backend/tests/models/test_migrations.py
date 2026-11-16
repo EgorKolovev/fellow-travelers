@@ -142,3 +142,33 @@ async def test_audit_log_downgrade_drops_table_trigger_and_function_then_upgrade
     finally:
         await asyncio.to_thread(migrate_from_scratch, migrated_database)
         await db_engine.dispose()
+
+
+async def _departed_from_transfer_column(engine: AsyncEngine) -> dict[str, object] | None:
+    async with engine.connect() as connection:
+        columns = await connection.run_sync(lambda c: inspect(c).get_columns("applications"))
+        foreign_keys = await connection.run_sync(
+            lambda c: inspect(c).get_foreign_keys("applications")
+        )
+    found = [c for c in columns if c["name"] == "departed_from_transfer_id"]
+    if not found:
+        return None
+    assert not any("departed_from_transfer_id" in fk["constrained_columns"] for fk in foreign_keys)
+    return {"nullable": found[0]["nullable"]}
+
+
+async def test_0007_adds_and_drops_departed_from_transfer_without_fk(
+    db_engine: AsyncEngine, migrated_database: str
+) -> None:
+    assert await _departed_from_transfer_column(db_engine) == {"nullable": True}
+    try:
+        await asyncio.to_thread(command.downgrade, alembic_config(), "0006")
+        await db_engine.dispose()
+        assert await _departed_from_transfer_column(db_engine) is None
+
+        await asyncio.to_thread(command.upgrade, alembic_config(), "head")
+        await db_engine.dispose()
+        assert await _departed_from_transfer_column(db_engine) == {"nullable": True}
+    finally:
+        await asyncio.to_thread(migrate_from_scratch, migrated_database)
+        await db_engine.dispose()

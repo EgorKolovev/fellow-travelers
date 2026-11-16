@@ -6,9 +6,11 @@ from fastapi import APIRouter, Query
 from app.api.deps import CurrentUser, SessionDep
 from app.models import ApplicationStatus
 from app.schemas.admin import AdminParticipant, AdminParticipants
+from app.schemas.application import Application
 from app.schemas.history import HistoryPage
 from app.schemas.transfer import Transfer, TransferMembersInput
 from app.services import admin as admin_service
+from app.services import admin_departures as admin_departures_service
 from app.services import admin_transfers as admin_transfers_service
 from app.services import history as history_service
 from app.services.access import get_event_for_admin
@@ -66,6 +68,28 @@ async def set_transfer_members(
     event = await get_event_for_admin(session, event_id, user)
     transfer = await admin_transfers_service.set_transfer_members(
         session, event, user, transfer_id, data.application_ids
+    )
+    return Transfer.build(transfer, viewer_id=None)
+
+
+@router.post("/applications/{application_id}/departed")
+async def mark_application_departed(
+    event_id: uuid.UUID, application_id: uuid.UUID, user: CurrentUser, session: SessionDep
+) -> Application:
+    event = await get_event_for_admin(session, event_id, user)
+    application = await admin_departures_service.mark_application_departed(
+        session, event, user, application_id
+    )
+    return Application.build(application)
+
+
+@router.post("/transfers/{transfer_id}/departed")
+async def mark_transfer_departed(
+    event_id: uuid.UUID, transfer_id: uuid.UUID, user: CurrentUser, session: SessionDep
+) -> Transfer:
+    event = await get_event_for_admin(session, event_id, user)
+    transfer = await admin_departures_service.mark_transfer_members_departed(
+        session, event, user, transfer_id
     )
     return Transfer.build(transfer, viewer_id=None)
 
