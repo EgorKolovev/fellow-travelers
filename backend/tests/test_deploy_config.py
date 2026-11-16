@@ -364,3 +364,53 @@ def test_worker_has_time_to_finish_current_work_on_stop(path: Path) -> None:
 
     # отправка в Telegram идёт до 20 с: docker по умолчанию убил бы воркер через 10 с
     assert compose["services"]["worker"]["stop_grace_period"] == "30s"
+
+
+@pytest.mark.parametrize(
+    ("path", "key", "gateway"),
+    [
+        (DEV_COMPOSE, "${AERODATABOX_API_KEY:-}", "${AERODATABOX_GATEWAY:-apimarket}"),
+        (PROD_COMPOSE, "${AERODATABOX_API_KEY}", "${AERODATABOX_GATEWAY}"),
+    ],
+    ids=["dev", "prod"],
+)
+def test_aerodatabox_settings_reach_api_and_worker(path: Path, key: str, gateway: str) -> None:
+    compose: dict[str, Any] = yaml.safe_load(path.read_text(encoding="utf-8"))
+    services = compose["services"]
+
+    for name in ("api", "worker"):
+        env = services[name]["environment"]
+        assert str(env["AERODATABOX_API_KEY"]).strip('"') == key
+        assert str(env["AERODATABOX_GATEWAY"]).strip('"') == gateway
+    # бот поставщика рейсов не использует: ключ ему не нужен
+    assert "AERODATABOX_API_KEY" not in services.get("bot", {}).get("environment", {})
+
+
+def test_deploy_passes_aerodatabox_settings_to_prod_spec() -> None:
+    workflow: dict[str, Any] = yaml.safe_load(
+        (REPO_DIR / ".github" / "workflows" / "deploy.yml").read_text(encoding="utf-8")
+    )
+    steps = [
+        step
+        for job in workflow["jobs"].values()
+        for step in job.get("steps", [])
+        if step.get("name") == "Собрать спецификацию контейнеров"
+    ]
+    assert len(steps) == 1
+    step = steps[0]
+
+    assert step["env"]["AERODATABOX_API_KEY"] == "${{ secrets.AERODATABOX_API_KEY }}"
+    assert step["env"]["AERODATABOX_GATEWAY"] == "${{ secrets.AERODATABOX_GATEWAY || 'apimarket' }}"
+    envsubst_list = re.search(r"envsubst\s+'([^']*)'", step["run"])
+    assert envsubst_list
+    listed = set(re.findall(r"\$\{(\w+)\}", envsubst_list.group(1)))
+    assert {"AERODATABOX_API_KEY", "AERODATABOX_GATEWAY"} <= listed
+
+    compose: dict[str, Any] = yaml.safe_load(PROD_COMPOSE.read_text(encoding="utf-8"))
+    plain = re.compile(r"\$\{(\w+)\}")
+    for service in ("api", "worker"):
+        for name in ("AERODATABOX_API_KEY", "AERODATABOX_GATEWAY"):
+            value = str(compose["services"][service]["environment"][name]).strip('"')
+            match = plain.fullmatch(value)
+            assert match, f"{service}.{name}: {value}"
+            assert match.group(1) in listed

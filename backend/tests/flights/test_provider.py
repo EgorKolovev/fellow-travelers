@@ -9,6 +9,7 @@ from app.flights import (
     ProviderUnavailableError,
     build_provider,
 )
+from app.flights.aerodatabox import AeroDataBoxProvider
 from app.models.enums import TripStatus
 
 DEPARTURE = datetime(2026, 11, 12, 7, 0, tzinfo=UTC)
@@ -116,7 +117,7 @@ async def test_fake_delay_slows_response() -> None:
     assert datetime.now(UTC) - started >= timedelta(milliseconds=45)
 
 
-def _settings(monkeypatch: pytest.MonkeyPatch, value: str | None) -> Settings:
+def _settings(monkeypatch: pytest.MonkeyPatch, value: str | None, **env: str) -> Settings:
     monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@localhost/db")
     monkeypatch.setenv("BOT_TOKEN", "123:abc")
     monkeypatch.setenv("BOT_USERNAME", "my_bot1")
@@ -124,6 +125,8 @@ def _settings(monkeypatch: pytest.MonkeyPatch, value: str | None) -> Settings:
         monkeypatch.delenv("FLIGHT_PROVIDER", raising=False)
     else:
         monkeypatch.setenv("FLIGHT_PROVIDER", value)
+    for name, raw in env.items():
+        monkeypatch.setenv(name, raw)
     return Settings(_env_file=None)
 
 
@@ -134,6 +137,32 @@ def test_build_provider_none_by_default(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_build_provider_fake(monkeypatch: pytest.MonkeyPatch) -> None:
     assert isinstance(build_provider(_settings(monkeypatch, "fake")), FakeFlightProvider)
+
+
+@pytest.mark.parametrize("gateway", ["direct", "apimarket", "rapidapi"])
+def test_build_provider_aerodatabox(monkeypatch: pytest.MonkeyPatch, gateway: str) -> None:
+    settings = _settings(
+        monkeypatch, "aerodatabox", AERODATABOX_API_KEY="k-1", AERODATABOX_GATEWAY=gateway
+    )
+
+    provider = build_provider(settings)
+
+    assert isinstance(provider, AeroDataBoxProvider)
+    assert provider.gateway == gateway
+
+
+def test_build_provider_aerodatabox_default_gateway(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = build_provider(_settings(monkeypatch, "aerodatabox", AERODATABOX_API_KEY="k-1"))
+
+    assert isinstance(provider, AeroDataBoxProvider)
+    assert provider.gateway == "apimarket"
+
+
+def test_aerodatabox_without_key_fails_to_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AERODATABOX_API_KEY", raising=False)
+
+    with pytest.raises(ValueError, match="AERODATABOX_API_KEY"):
+        _settings(monkeypatch, "aerodatabox")
 
 
 def test_unknown_provider_name_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:

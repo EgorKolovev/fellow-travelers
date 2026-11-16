@@ -108,3 +108,69 @@ def test_retention_enabled_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BOT_USERNAME", "my_bot1")
 
     assert Settings(_env_file=None).retention_enabled is True
+
+
+def make_flight_settings(monkeypatch: pytest.MonkeyPatch, **env: str) -> Settings:
+    monkeypatch.setenv("BOT_USERNAME", "my_bot1")
+    for name in ("FLIGHT_PROVIDER", "AERODATABOX_API_KEY", "AERODATABOX_GATEWAY"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    return Settings(_env_file=None)
+
+
+def test_aerodatabox_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = make_flight_settings(monkeypatch)
+
+    assert settings.flight_provider == "none"
+    assert settings.aerodatabox_api_key is None
+    assert settings.aerodatabox_gateway == "apimarket"
+
+
+def test_aerodatabox_requires_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(ValidationError, match="AERODATABOX_API_KEY"):
+        make_flight_settings(monkeypatch, FLIGHT_PROVIDER="aerodatabox")
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_aerodatabox_blank_key_counts_as_missing(
+    monkeypatch: pytest.MonkeyPatch, blank: str
+) -> None:
+    with pytest.raises(ValidationError, match="AERODATABOX_API_KEY"):
+        make_flight_settings(monkeypatch, FLIGHT_PROVIDER="aerodatabox", AERODATABOX_API_KEY=blank)
+
+
+@pytest.mark.parametrize("provider", ["none", "fake"])
+def test_blank_key_does_not_break_other_providers(
+    monkeypatch: pytest.MonkeyPatch, provider: str
+) -> None:
+    settings = make_flight_settings(
+        monkeypatch, FLIGHT_PROVIDER=provider, AERODATABOX_API_KEY="", AERODATABOX_GATEWAY=""
+    )
+
+    assert settings.aerodatabox_api_key is None
+    assert settings.aerodatabox_gateway == "apimarket"
+
+
+def test_aerodatabox_key_is_secret_and_error_does_not_leak_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = make_flight_settings(
+        monkeypatch,
+        FLIGHT_PROVIDER="aerodatabox",
+        AERODATABOX_API_KEY="top-secret-key",
+        AERODATABOX_GATEWAY="rapidapi",
+    )
+
+    assert settings.aerodatabox_api_key is not None
+    assert settings.aerodatabox_api_key.get_secret_value() == "top-secret-key"
+    assert "top-secret-key" not in repr(settings)
+    assert settings.aerodatabox_gateway == "rapidapi"
+    with pytest.raises(ValidationError) as info:
+        make_flight_settings(monkeypatch, FLIGHT_PROVIDER="aerodatabox", AERODATABOX_API_KEY=" ")
+    assert "top-secret-key" not in str(info.value)
+
+
+def test_aerodatabox_unknown_gateway_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(ValidationError, match="aerodatabox_gateway"):
+        make_flight_settings(monkeypatch, AERODATABOX_GATEWAY="other")

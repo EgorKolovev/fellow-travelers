@@ -1,0 +1,55 @@
+[
+  {
+    "number": "SU 1120",
+    "callSign": "AFL1120",
+    "status": "Expected",
+    "codeshareStatus": "IsOperator",
+    "isCargo": false,
+    "departure": {
+      "airport": {
+        "icao": "USVO",
+        "iata": "SVO",
+        "name": "Moscow",
+        "shortName": "Moscow",
+        "municipalityName": "Moscow",
+        "timeZone": "Europe/Moscow"
+      },
+      "scheduledTime": {
+        "utc": "2026-11-20T07:20:00Z",
+        "local": "2026-11-20T10:20:00+03:00"
+      },
+      "quality": [
+        "Basic"
+      ]
+    },
+    "arrival": {
+      "airport": {
+        "icao": "ULED",
+        "iata": "LED",
+        "name": "St Petersburg",
+        "shortName": "St Petersburg",
+        "municipalityName": "St Petersburg",
+        "timeZone": "Europe/Moscow"
+      },
+      "scheduledTime": {
+        "utc": "2026-11-20 08:50:00Z",
+        "local": "2026-11-20 11:50+03:00"
+      },
+      "quality": [
+        "Basic"
+      ],
+      "revisedTime": {
+        "utc": "2026-11-20T12:10:00+03:00"
+      }
+    },
+    "airline": {
+      "name": "Aeroflot",
+      "iata": "SU",
+      "icao": "AFL"
+    },
+    "aircraft": {
+      "model": "Airbus A320"
+    },
+    "lastUpdatedUtc": "2026-11-19 20:00Z"
+  }
+]

@@ -100,8 +100,10 @@ UPDATE background_jobs SET status = 'pending', attempts = 0, run_after = now() W
 
 - **Опрос рейсов поставщика** раз в 30 секунд, если `FLIGHT_PROVIDER` не `none`. Опрашиваются только рейсы с
   активными заявками; расписание — Д2 в `docs/spec-mvp.md`. Изменения пишутся в историю от `system` и ставят
-  пересчёт трансферов. Сейчас доступны `none` (по умолчанию: поиск рейсов отвечает 503) и `fake` (тестовый
-  поставщик в памяти, только для разработки).
+  пересчёт трансферов. Доступны `none` (по умолчанию: поиск рейсов отвечает 503), `fake` (тестовый поставщик в
+  памяти, только для разработки) и `aerodatabox` (AeroDataBox; нужны `AERODATABOX_API_KEY` и
+  `AERODATABOX_GATEWAY` = `apimarket`, `direct` или `rapidapi`, по умолчанию `apimarket`; см. `docs/spec-mvp.md`,
+  M-01a). Перед включением проверьте ключ с ВМ: `GET /health/services/airports/UUEE/feeds` (0 единиц).
 - **Отправка уведомлений** через бота раз в 5 секунд. Строки `notifications` создаются при commit изменений.
   На человека в группе есть не больше одной неотправленной строки (`pending`): новое событие склеивается в
   неё (другой вид события даёт общий текст «несколько изменений»). Новая строка ждёт 30 секунд, чтобы частые
@@ -119,8 +121,9 @@ UPDATE background_jobs SET status = 'pending', attempts = 0, run_after = now() W
   правка группы. Удаление необратимо; пользователи
   остаются.
 
-В проде `FLIGHT_PROVIDER` и `RETENTION_ENABLED` задаются секретами репозитория с теми же именами; без секретов
-действуют `none` и `false`. Деплой (`.github/workflows/deploy.yml`) подставляет их в
+В проде `FLIGHT_PROVIDER`, `RETENTION_ENABLED`, `AERODATABOX_API_KEY` и `AERODATABOX_GATEWAY` задаются секретами
+репозитория с теми же именами; без секретов действуют `none`, `false`, пустой ключ и `apimarket`. Ключ нужен только
+при `FLIGHT_PROVIDER=aerodatabox` и передаётся только контейнерам `api` и `worker`. Деплой (`.github/workflows/deploy.yml`) подставляет их в
 `deploy/docker-compose.prod.yml` через `envsubst`, поэтому там стоят простые `${FLIGHT_PROVIDER}` и
 `${RETENTION_ENABLED}`: выражения вида `${VAR:-default}` `envsubst` не подставляет. Перед первым включением
 `RETENTION_ENABLED` сделайте дамп БД: удаление необратимо.
