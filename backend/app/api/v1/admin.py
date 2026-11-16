@@ -4,11 +4,12 @@ from typing import Annotated
 from fastapi import APIRouter, Query
 
 from app.api.deps import CurrentUser, SessionDep
-from app.models import ApplicationStatus
-from app.schemas.admin import AdminParticipant, AdminParticipants
+from app.models import ApplicationStatus, TripStatus
+from app.schemas.admin import AdminParticipant, AdminParticipants, Board, BoardTrip
 from app.schemas.application import Application
 from app.schemas.history import HistoryPage
 from app.schemas.transfer import Transfer, TransferMembersInput
+from app.schemas.trip import Trip
 from app.services import admin as admin_service
 from app.services import admin_departures as admin_departures_service
 from app.services import admin_transfers as admin_transfers_service
@@ -34,6 +35,24 @@ async def list_participants(
     return AdminParticipants(
         counters=counters,
         participants=[AdminParticipant.build(u, a) for u, a in rows],
+    )
+
+
+@router.get("/board")
+async def get_board(
+    event_id: uuid.UUID,
+    user: CurrentUser,
+    session: SessionDep,
+    trip_status: Annotated[list[TripStatus] | None, Query()] = None,
+) -> Board:
+    event = await get_event_for_admin(session, event_id, user)
+    counters, rows = await admin_service.get_board(session, event.id, trip_statuses=trip_status)
+    return Board(
+        counters=counters,
+        trips=[
+            BoardTrip(trip=Trip.build(r.trip), people=r.people, application_ids=r.application_ids)
+            for r in rows
+        ],
     )
 
 

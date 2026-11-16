@@ -1,8 +1,11 @@
+import uuid
+
 from pydantic import BaseModel
 
 from app.models import Application as ApplicationModel
 from app.models import User
 from app.schemas.application import Application
+from app.schemas.trip import Trip
 from app.schemas.user import Contact
 
 
@@ -31,3 +34,14 @@ class AdminParticipant(BaseModel):
 class AdminParticipants(BaseModel):
     counters: Counters
     participants: list[AdminParticipant]
+
+
+class BoardTrip(BaseModel):
+    trip: Trip
+    people: int
+    application_ids: list[uuid.UUID]
+
+
+class Board(BaseModel):
+    counters: Counters
+    trips: list[BoardTrip]
