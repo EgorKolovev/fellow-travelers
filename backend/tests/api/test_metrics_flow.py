@@ -11,7 +11,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import AuditReason, Event, JobKind, JobStatus, User
 from app.observability.metrics import MatchTrigger, PlacementKind
 from app.services.jobs import JobOutcome, observe_queue, process_next
-from tests.api.test_applications import act, apply, body, get_app, join, put_app, trip_at
+from tests.api.test_applications import (
+    act,
+    apply,
+    body,
+    get_app,
+    join,
+    marks,
+    put_app,
+    trip_at,
+)
 from tests.api.test_trips import patch_trip
 from tests.factories import make_event, make_membership, make_trip, make_user
 from tests.helpers.jobs import shared_session_factory
@@ -131,10 +140,11 @@ async def test_rejected_requests_do_not_count(
 ) -> None:
     await apply(api_client, db_session, event, 42)
     await apply(api_client, db_session, event, 101)
+    await marks(api_client, db_session, event, {"departed": True})
     trip_id = await trip_at(db_session, event, 1)
     before = {name: total(name) for name in MATCH_METRICS}
 
-    locked = await put_app(api_client, db_session, event, body(trip_id))  # 409: уже в трансфере
+    locked = await put_app(api_client, db_session, event, body(trip_id))  # 409: уже уехал
     unknown = await put_app(api_client, db_session, event, body(MISSING_TRIP_ID))  # 422
 
     assert (locked.status_code, unknown.status_code) == (409, 422)

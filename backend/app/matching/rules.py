@@ -46,6 +46,14 @@ def is_compatible(group: Sequence[MatchCandidate]) -> bool:
     return all(latest - c.arrival_at <= c.max_wait for c in group)
 
 
+def fits_transfer(candidate: MatchCandidate, others: Sequence[MatchCandidate]) -> bool:
+    """Остаётся ли заявка в трансфере с новыми данными: она и остальные участники совместимы.
+
+    `others` — остальные заявки трансфера без самого `candidate`.
+    """
+    return is_compatible((candidate, *others))
+
+
 def _sort_key(c: MatchCandidate) -> tuple[datetime, UUID]:
     return c.arrival_at, c.id
 

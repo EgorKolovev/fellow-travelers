@@ -13,6 +13,7 @@ from app.matching import (
     OpenTransfer,
     find_group,
     find_placement,
+    fits_transfer,
     is_compatible,
     members_to_exclude,
 )
@@ -280,3 +281,14 @@ def test_exclusion_independent_of_order(scenario: ExclusionScenario, rnd: random
 def test_exclusion_matches_brute_force(scenario: ExclusionScenario) -> None:
     waiting, changed = scenario
     assert members_to_exclude(waiting, changed) == _brute_exclusion(waiting, changed)
+
+
+@settings(max_examples=200, deadline=None)
+@given(_scenario(), st.randoms(use_true_random=False))
+def test_fits_transfer_equals_is_compatible(scenario: Scenario, rnd: random.Random) -> None:
+    candidate, others = scenario
+    expected = is_compatible((candidate, *others))
+    assert fits_transfer(candidate, others) is expected
+    shuffled = list(others)
+    rnd.shuffle(shuffled)
+    assert fits_transfer(candidate, shuffled) is expected

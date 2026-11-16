@@ -757,21 +757,210 @@ async def test_third_picks_one_of_two_incompatible(
 # ---------------------------------------------------------------- assigned
 
 
-async def test_put_when_assigned_is_locked(
+async def test_put_assigned_compatible_edit_keeps_transfer(
+    api_client: AsyncClient, db_session: AsyncSession, event: Event, p2: User
+) -> None:
+    await apply(api_client, db_session, event, 42)
+    pair = await apply(api_client, db_session, event, 101)
+    transfer_id = pair.json()["transfer_id"]
+    trip_id = await trip_at(db_session, event, 1)
+
+    response = await put_app(
+        api_client, db_session, event, body(trip_id, baggage_count=2, max_wait_minutes=30)
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "assigned"
+    assert response.json()["transfer_id"] == transfer_id
+    assert response.json()["baggage_count"] == 2
+    assert await members_of(db_session, transfer_id) == 2
+    history = await audit_rows(db_session, event.id)
+    assert history[-1].action == "application_updated"
+    assert not [row for row in history if row.action == "transfer_left"]
+    await assert_history_matches_transfers(db_session, event.id)
+
+
+async def test_put_assigned_same_data_writes_nothing(
+    api_client: AsyncClient, db_session: AsyncSession, event: Event, p2: User
+) -> None:
+    await apply(api_client, db_session, event, 42)
+    pair = await apply(api_client, db_session, event, 101)
+    before = len(await audit_rows(db_session, event.id))
+    current = (await get_app(api_client, event)).json()
+
+    response = await put_app(
+        api_client,
+        db_session,
+        event,
+        body(current["trip"]["id"], max_wait_minutes=current["max_wait_minutes"]),
+    )
+
+    assert response.json()["transfer_id"] == pair.json()["transfer_id"]
+    assert len(await audit_rows(db_session, event.id)) == before
+
+
+async def test_put_assigned_incompatible_in_pair_leaves_and_dissolves(
+    api_client: AsyncClient, db_session: AsyncSession, event: Event, p2: User
+) -> None:
+    await apply(api_client, db_session, event, 42)
+    await apply(api_client, db_session, event, 101, minutes=1)
+    trip_id = await trip_at(db_session, event, 120)
+
+    response = await put_app(api_client, db_session, event, body(trip_id))
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "searching"
+    assert response.json()["transfer_id"] is None
+    other = (await get_app(api_client, event, 101)).json()
+    assert (other["status"], other["transfer_id"]) == ("searching", None)
+    assert await transfer_count(db_session, event) == 0
+    history = await audit_rows(db_session, event.id)
+    left = [row for row in history if row.action == "transfer_left"]
+    assert (left[0].reason, left[0].actor_kind) == ("application_changed", "participant")
+    assert [row.reason for row in left[1:]] == ["member_left"]
+    assert history[-1].action != "transfer_created"
+    await assert_history_matches_transfers(db_session, event.id)
+
+
+async def test_put_assigned_incompatible_changed_joins_waiting_application(
+    api_client: AsyncClient, db_session: AsyncSession, event: Event, p2: User, p3: User
+) -> None:
+    await apply(api_client, db_session, event, 42)
+    await apply(api_client, db_session, event, 101, minutes=1)
+    waiting = await apply(api_client, db_session, event, 102, minutes=120)
+    assert waiting.json()["status"] == "searching"
+    trip_id = await trip_at(db_session, event, 120)
+
+    response = await put_app(api_client, db_session, event, body(trip_id))
+
+    assert response.json()["status"] == "assigned"
+    partner = (await get_app(api_client, event, 102)).json()
+    assert partner["transfer_id"] == response.json()["transfer_id"]
+    left_behind = (await get_app(api_client, event, 101)).json()
+    assert (left_behind["status"], left_behind["transfer_id"]) == ("searching", None)
+    assert await transfer_count(db_session, event) == 1
+    await assert_history_matches_transfers(db_session, event.id)
+
+
+async def test_put_assigned_incompatible_in_triple_refills_place(
+    api_client: AsyncClient, db_session: AsyncSession, event: Event, p2: User, p3: User
+) -> None:
+    p4 = await join(db_session, event, 103)
+    await apply(api_client, db_session, event, 42)
+    await apply(api_client, db_session, event, 101, minutes=1)
+    triple = await apply(api_client, db_session, event, 102, minutes=2)
+    transfer_id = triple.json()["transfer_id"]
+    waiting = await apply(api_client, db_session, event, p4.telegram_id, minutes=1)
+    assert waiting.json()["status"] == "searching"  # машина полная
+    trip_id = await trip_at(db_session, event, 120)
+
+    response = await put_app(api_client, db_session, event, body(trip_id))
+
+    assert response.json()["status"] == "searching"
+    assert response.json()["transfer_id"] is None
+    for telegram_id in (101, 102, p4.telegram_id):
+        member = (await get_app(api_client, event, telegram_id)).json()
+        assert (member["status"], member["transfer_id"]) == ("assigned", transfer_id)
+    assert await transfer_count(db_session, event) == 1
+    assert await members_of(db_session, transfer_id) == 3
+    history = await audit_rows(db_session, event.id)
+    assert history[-1].action == "transfer_joined"
+    left = [row for row in history if row.action == "transfer_left"]
+    assert [(row.reason, row.actor_kind) for row in left] == [
+        ("application_changed", "participant")
+    ]
+    await assert_history_matches_transfers(db_session, event.id)
+
+
+@pytest.mark.parametrize("triple", [False, True])
+async def test_put_assigned_seek_false_goes_solo(
+    api_client: AsyncClient,
+    db_session: AsyncSession,
+    event: Event,
+    p2: User,
+    p3: User,
+    triple: bool,
+) -> None:
+    await apply(api_client, db_session, event, 42)
+    group = await apply(api_client, db_session, event, 101)
+    if triple:
+        group = await apply(api_client, db_session, event, 102)
+    trip_id = await trip_at(db_session, event, 1)
+
+    response = await put_app(
+        api_client, db_session, event, body(trip_id, baggage_count=1, seek_companions=False)
+    )
+
+    assert response.json()["status"] == "solo"
+    assert response.json()["transfer_id"] is None
+    assert response.json()["baggage_count"] == 1
+    remaining = (await get_app(api_client, event, 101)).json()
+    if triple:
+        assert remaining["transfer_id"] == group.json()["transfer_id"]
+        assert await transfer_count(db_session, event) == 1
+    else:
+        assert (remaining["status"], remaining["transfer_id"]) == ("searching", None)
+        assert await transfer_count(db_session, event) == 0
+    history = await audit_rows(db_session, event.id)
+    left = [row for row in history if row.action == "transfer_left"]
+    assert (left[0].reason, left[0].actor_kind) == ("go_solo", "participant")
+    await assert_history_matches_transfers(db_session, event.id)
+
+
+async def test_put_assigned_seek_true_compatible_stays_assigned(
+    api_client: AsyncClient, db_session: AsyncSession, event: Event, p2: User
+) -> None:
+    await apply(api_client, db_session, event, 42)
+    pair = await apply(api_client, db_session, event, 101)
+    trip_id = await trip_at(db_session, event, 1)
+
+    response = await put_app(api_client, db_session, event, body(trip_id, seek_companions=True))
+
+    assert response.json()["status"] == "assigned"
+    assert response.json()["transfer_id"] == pair.json()["transfer_id"]
+
+
+async def test_put_assigned_in_admin_transfer_leaves_without_refill(
+    api_client: AsyncClient, db_session: AsyncSession, event: Event, user: User, p2: User, p3: User
+) -> None:
+    p4 = await join(db_session, event, 103)
+    transfer = await make_transfer(db_session, event_id=event.id, origin=TransferOrigin.ADMIN)
+    for person in (user, p2, p3):
+        await make_application(
+            db_session,
+            event_id=event.id,
+            user_id=person.id,
+            trip_id=await trip_at(db_session, event),
+            transfer_id=transfer.id,
+            baggage_count=0,
+        )
+    waiting = await apply(api_client, db_session, event, p4.telegram_id)
+    assert waiting.json()["status"] == "searching"
+    trip_id = await trip_at(db_session, event, 120)
+
+    response = await put_app(api_client, db_session, event, body(trip_id))
+
+    assert response.json()["status"] == "searching"
+    assert response.json()["transfer_id"] is None
+    assert await members_of(db_session, str(transfer.id)) == 2
+    newcomer = (await get_app(api_client, event, p4.telegram_id)).json()
+    assert (newcomer["status"], newcomer["transfer_id"]) == ("searching", None)
+    kept = await db_session.scalar(select(Transfer.origin).where(Transfer.id == transfer.id))
+    assert kept == TransferOrigin.ADMIN
+
+
+async def test_put_assigned_after_departure_conflict(
     api_client: AsyncClient, db_session: AsyncSession, event: Event, p2: User
 ) -> None:
     await apply(api_client, db_session, event, 42)
     await apply(api_client, db_session, event, 101)
+    await marks(api_client, db_session, event, {"departed": True})
     trip_id = await trip_at(db_session, event, 1)
 
     response = await put_app(api_client, db_session, event, body(trip_id, baggage_count=2))
 
     assert response.status_code == 409
-    assert error_code(response) == "APPLICATION_LOCKED"
-    assert response.json()["error"]["message"] == (
-        "Попутчики уже назначены. Чтобы изменить заявку, сначала выйдите из трансфера"
-    )
-    assert (await get_app(api_client, event)).json()["baggage_count"] == 0
+    assert error_code(response) == "ALREADY_DEPARTED"
 
 
 # ---------------------------------------------------------------- go-solo / cancel
@@ -1423,20 +1612,6 @@ async def test_put_without_seek_keeps_solo(
     assert response.json()["status"] == "solo"
 
 
-@pytest.mark.parametrize("seek", [False, True])
-async def test_put_seek_when_assigned_is_locked(
-    api_client: AsyncClient, db_session: AsyncSession, event: Event, p2: User, seek: bool
-) -> None:
-    await apply(api_client, db_session, event, 42)
-    await apply(api_client, db_session, event, 101)
-    trip_id = await trip_at(db_session, event, 1)
-
-    response = await put_app(api_client, db_session, event, body(trip_id, seek_companions=seek))
-
-    assert response.status_code == 409
-    assert error_code(response) == "APPLICATION_LOCKED"
-
-
 async def test_put_seek_null_is_rejected(
     api_client: AsyncClient, db_session: AsyncSession, event: Event
 ) -> None:
@@ -1446,3 +1621,31 @@ async def test_put_seek_null_is_rejected(
 
     assert response.status_code == 422
     assert "seek_companions" in response.json()["error"]["details"]["fields"]
+
+
+async def test_put_assigned_with_vanished_trip_is_422(
+    api_client: AsyncClient,
+    db_session: AsyncSession,
+    event: Event,
+    p2: User,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await apply(api_client, db_session, event, 42)
+    pair = await apply(api_client, db_session, event, 101)
+
+    async def skip_check(*_: Any) -> None:
+        """Рейс удалили между проверкой и блокировкой: проверка его уже не видит."""
+
+    monkeypatch.setattr(applications_service, "_check_trip", skip_check)
+
+    # put_app не подходит: общая тестовая сессия после FK-ошибки в откате, проверять БД нельзя
+    response = await api_client.put(
+        f"/events/{event.id}/my-application",
+        json=body(uuid.uuid4()),
+        headers=auth_headers(USER_TELEGRAM_ID),
+    )
+    assert_contract(response, "PUT", APP_PATH)
+
+    assert response.status_code == 422
+    assert response.json()["error"]["details"]["fields"] == {"trip_id": "Рейс не найден"}
+    assert pair.json()["transfer_id"] is not None

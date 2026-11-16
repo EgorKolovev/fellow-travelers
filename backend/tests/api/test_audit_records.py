@@ -403,10 +403,11 @@ async def test_failed_scenarios_write_nothing(
 ) -> None:
     await apply(api_client, db_session, event, 42)
     await apply(api_client, db_session, event, 101)
+    await marks(api_client, db_session, event, {"departed": True})
     before = len(await rows(db_session, event))
     trip_id = await trip_at(db_session, event)
 
-    locked = await put_app(api_client, db_session, event, body(trip_id))  # 409: назначена группа
+    locked = await put_app(api_client, db_session, event, body(trip_id))  # 409: уже уехал
     unknown = await put_app(api_client, db_session, event, body(uuid.uuid4()))  # 422: нет рейса
 
     assert (locked.status_code, unknown.status_code) == (409, 422)

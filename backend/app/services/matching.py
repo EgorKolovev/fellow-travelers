@@ -13,6 +13,7 @@ from app.matching import (
     MatchCandidate,
     OpenTransfer,
     find_placement,
+    fits_transfer,
     members_to_exclude,
 )
 from app.models import (
@@ -523,6 +524,30 @@ async def leave_transfer(
         details={"application_ids": [str(app.id) for app in remaining]},
     )
     defer_increment(session, metrics.transfers_dissolved_total.labels(reason.value))
+
+
+async def fits_current_transfer(session: AsyncSession, application: Application) -> bool:
+    """Подходит ли заявка с новыми данными остальным участникам её трансфера (Д5)."""
+    rows = (
+        await session.execute(
+            select(Application, Trip)
+            .join(Trip, Trip.id == Application.trip_id)
+            .where(
+                Application.transfer_id == application.transfer_id,
+                Application.id != application.id,
+            )
+            .execution_options(populate_existing=True)
+        )
+    ).all()
+    own_trip = (
+        await session.execute(
+            select(Trip).where(Trip.id == application.trip_id),
+            execution_options={"populate_existing": True},
+        )
+    ).scalar_one()
+    return fits_transfer(
+        _candidate(application, own_trip), [_candidate(app, trip) for app, trip in rows]
+    )
 
 
 async def mark_transfer_departed(

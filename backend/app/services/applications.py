@@ -23,6 +23,7 @@ from app.services.audit import Actor, record
 from app.services.matching import (
     all_departed,
     fill_event,
+    fits_current_transfer,
     leave_transfer,
     lock_event,
     mark_transfer_departed,
@@ -148,6 +149,9 @@ async def upsert_my_application(
     application = await find_application(session, event.id, user.id)
     created = application is None
     changed_fields: list[str] = []
+    leave_reason: AuditReason | None = None
+    check_fit = False
+    before: dict[str, object] = {}
     if application is None:
         application = Application(
             event_id=event.id,
@@ -166,26 +170,21 @@ async def upsert_my_application(
     else:
         if application.departed_at is not None:
             raise _already_departed()
-        if application.status == ApplicationStatus.ASSIGNED:
-            raise AppError(
-                ErrorCode.APPLICATION_LOCKED,
-                "Попутчики уже назначены. Чтобы изменить заявку, сначала выйдите из трансфера",
-                409,
-            )
         before = {name: getattr(application, name) for name in _TRACKED_FIELDS}
         application.trip_id = data.trip_id
         application.with_companion = data.with_companion
         application.baggage_count = data.baggage_count
         application.max_wait_minutes = data.max_wait_minutes
-        if data.seek_companions is True:
+        if application.status == ApplicationStatus.ASSIGNED:
+            # Д5: правка назначенной заявки; статус не трогаем, пока она не вышла из трансфера.
+            # Совместимость проверяется после flush: FK гарантирует, что рейс существует
+            check_fit = True
+        elif data.seek_companions is True:
             application.status = ApplicationStatus.SEARCHING
         elif data.seek_companions is False:
             application.status = ApplicationStatus.SOLO
         elif application.status == ApplicationStatus.CANCELLED:
             application.status = ApplicationStatus.SEARCHING
-        changed_fields = [
-            name for name in _TRACKED_FIELDS if getattr(application, name) != before[name]
-        ]
     try:
         async with session.begin_nested():
             await session.flush()
@@ -194,6 +193,26 @@ async def upsert_my_application(
         if getattr(exc.orig, "sqlstate", None) == _FOREIGN_KEY_VIOLATION:
             raise _trip_error() from exc
         raise
+    if check_fit:
+        if data.seek_companions is False:
+            leave_reason = AuditReason.GO_SOLO
+        elif not await fits_current_transfer(session, application):
+            leave_reason = AuditReason.APPLICATION_CHANGED
+    if leave_reason is not None:
+        await leave_transfer(
+            session,
+            application,
+            new_status=(
+                ApplicationStatus.SOLO
+                if leave_reason == AuditReason.GO_SOLO
+                else ApplicationStatus.SEARCHING
+            ),
+            actor=_participant(user),
+            reason=leave_reason,
+        )
+    changed_fields = [
+        name for name in _TRACKED_FIELDS if before and getattr(application, name) != before[name]
+    ]
     # статус в записи — до подбора: посадку в трансфер опишет transfer_created
     if created:
         record(
@@ -214,6 +233,9 @@ async def upsert_my_application(
             application=application,
             details={"changed_fields": changed_fields, "status": application.status.value},
         )
+    if leave_reason is not None:
+        # освободившееся место и оставшихся пристраивает общий проход; затем сама заявка
+        await fill_event(session, event.id, trigger=MatchTrigger.LEAVE)
     if application.status == ApplicationStatus.SEARCHING:
         await match_application(session, application, trigger=MatchTrigger.APPLICATION)
     return await _finish(session, event, user), created

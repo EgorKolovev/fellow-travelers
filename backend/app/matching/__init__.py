@@ -7,6 +7,7 @@ from app.matching.rules import (
     OpenTransfer,
     find_group,
     find_placement,
+    fits_transfer,
     is_compatible,
     members_to_exclude,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "OpenTransfer",
     "find_group",
     "find_placement",
+    "fits_transfer",
     "is_compatible",
     "members_to_exclude",
 ]
