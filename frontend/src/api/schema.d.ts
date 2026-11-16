@@ -218,7 +218,15 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Поиск авиарейса у поставщика по номеру и дате */
+        /**
+         * Поиск авиарейса у поставщика по номеру и дате
+         * @description Доступно участнику и админу группы; посторонний получает 404 NOT_FOUND.
+         *     Найденные рейсы сохраняются в группе с `source=provider`. Повторный поиск того же рейса не создаёт
+         *     дубль, а возвращает уже сохранённый рейс с обновлёнными данными.
+         *     Рейс, у которого аэропорта вылета или прилёта нет в справочнике `GET /locations`, в ответ не попадает.
+         *     Поставщик не настроен, недоступен или не ответил за 10 секунд → 503 FLIGHT_PROVIDER_UNAVAILABLE;
+         *     ручное добавление рейса админом при этом работает.
+         */
         get: operations["searchFlights"];
         put?: never;
         post?: never;
@@ -245,9 +253,10 @@ export interface paths {
          *     (вторая заявка не создаётся). Заявка в статусе `cancelled` при PUT возвращается в `searching`.
          *     Поле `seek_companions` задаёт статус явно: `false` → `solo` без подбора (так можно сразу
          *     создать заявку «еду самостоятельно»), `true` → `searching` с подбором.
-         *     pre-MVP: при статусе `assigned` → 409 APPLICATION_LOCKED (независимо от `seek_companions`).
-         *     MVP: изменение назначенной заявки — проверка совместимости, при несовместимости заявка выходит
-         *     из трансфера и снова ищет попутчиков.
+         *     MVP: заявку в статусе `assigned` тоже можно изменить. Если трансфер с новыми данными остаётся
+         *     совместимым и вмещает всех, заявка остаётся в нём. Иначе заявка выходит из трансфера, остальные
+         *     остаются вместе, сервис ищет им замену, а изменённая заявка снова проходит подбор
+         *     (`seek_companions=false` — получает `solo`). Ответ уже отражает итог.
          *     После «Уехал» → 409 ALREADY_DEPARTED.
          */
         put: operations["upsertMyApplication"];
@@ -328,9 +337,13 @@ export interface paths {
         /**
          * Отметки «Я на месте» / «Уехал» (CAP-08). Отметка автора относится и к спутнику
          * @description Передаются только меняемые поля.
-         *     pre-MVP: `departed=true` необратимо — `departed=false` после отъезда → 409 ALREADY_DEPARTED.
-         *     MVP: исправление ошибочного «Уехал» по согласованному правилу.
+         *     MVP: ошибочное «Уехал» можно отменить (`departed=false`) в течение 30 минут после отметки.
+         *     Если прежний трансфер ещё активен, заявка возвращается в него; если трансфера уже нет, заявка
+         *     получает `searching` и снова проходит подбор; заявка `solo` остаётся `solo`.
+         *     Позже 30 минут `departed=false` → 409 ALREADY_DEPARTED. Повтор `departed=true` идемпотентен.
+         *     Пока стоит «Уехал», `at_meeting_point` менять нельзя → 409 ALREADY_DEPARTED.
          *     Отметка «Уехал» на заявке в трансфере не отмечает остальных попутчиков.
+         *     Заявка в статусе `cancelled` → 409 APPLICATION_LOCKED.
          */
         put: operations["setMyMarks"];
         post?: never;
@@ -390,7 +403,17 @@ export interface paths {
         /** Составы трансферов группы */
         get: operations["adminListTransfers"];
         put?: never;
-        /** Создать трансфер вручную из заявок */
+        /**
+         * Создать трансфер вручную из заявок
+         * @description Минимум две заявки группы в статусе `searching` или `assigned` без отметки «Уехал».
+         *     Правила те же, что в автоподборе: один аэропорт прилёта, ожидание каждого, не больше 3 пассажиров
+         *     и 2 единиц багажа. Заявка из другого трансфера сначала выходит из него; прежний трансфер
+         *     дополняется по обычным правилам или расформировывается.
+         *     Ручной трансфер сервис сам не дополняет.
+         *     409: `INCOMPATIBLE_TRANSFER` — разные аэропорты или время не сходится; `CAPACITY_EXCEEDED` — мест
+         *     или багажа не хватает; `ALREADY_DEPARTED` — у заявки стоит «Уехал».
+         *     422: меньше двух заявок, повтор id, заявка не из этой группы, в статусе `solo` или `cancelled`.
+         */
         post: operations["adminCreateTransfer"];
         delete?: never;
         options?: never;
@@ -411,8 +434,11 @@ export interface paths {
         get?: never;
         /**
          * Задать состав трансфера целиком (до отъезда)
-         * @description Проверяются те же правила, что и в автоподборе. Исключённые заявки возвращаются в `searching`.
-         *     Пустой список расформировывает трансфер.
+         * @description Проверяются те же правила и ошибки, что в `POST /admin/transfers`. После правки трансфер считается
+         *     ручным и сам не дополняется. Убранные из состава заявки получают `searching` и снова проходят подбор.
+         *     Пустой список расформировывает трансфер: ответ — трансфер с пустым `members`, повторный запрос → 404.
+         *     Список из одной заявки → 422.
+         *     Трансфер в статусе `departed` → 409 ALREADY_DEPARTED. Трансфер из другой группы → 404.
          */
         put: operations["adminSetTransferMembers"];
         post?: never;
@@ -434,7 +460,13 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Админ отмечает отъезд заявки */
+        /**
+         * Админ отмечает отъезд заявки
+         * @description Ставит «Уехал» так же, как участник (`PUT .../marks` с `departed=true`): отметка относится и к спутнику,
+         *     статус заявки не меняется, попутчики по трансферу не отмечаются. Если уехали все участники трансфера,
+         *     он получает статус `departed`. Повтор идемпотентен и не меняет момент отъезда.
+         *     Заявка в статусе `cancelled` → 409 APPLICATION_LOCKED. Заявка из другой группы → 404.
+         */
         post: operations["adminMarkApplicationDeparted"];
         delete?: never;
         options?: never;
@@ -454,7 +486,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Админ отмечает отъезд всего трансфера */
+        /**
+         * Админ отмечает отъезд всего трансфера
+         * @description Ставит «Уехал» всем участникам трансфера, у кого его ещё нет; трансфер получает статус `departed`.
+         *     Повтор идемпотентен. Трансфер из другой группы → 404.
+         */
         post: operations["adminMarkTransferDeparted"];
         delete?: never;
         options?: never;
@@ -490,7 +526,12 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** Табло рейсов группы со сводными количествами */
+        /**
+         * Табло рейсов группы со сводными количествами
+         * @description Рейсы группы, на которые ссылается хотя бы одна заявка не в статусе `cancelled`, по возрастанию
+         *     `effective_arrival`. `people` и `counters` считают людей со спутниками; `cancelled` не входит в `expected`.
+         *     `counters` считаются по рейсам после фильтра `trip_status`. Без фильтра — все рейсы.
+         */
         get: operations["adminGetBoard"];
         put?: never;
         post?: never;
@@ -519,7 +560,7 @@ export interface components {
         /** @description Точка, заданная админом */
         Point: {
             address: string;
-            /** @description MVP: для ссылки на карту и Яндекс Go */
+            /** @description MVP: для ссылки на карту и Яндекс Go. Передаются обе координаты или ни одной, иначе 422 */
             lat?: number | null;
             lon?: number | null;
         };
@@ -839,6 +880,11 @@ export interface components {
          */
         MyTrip: {
             event: components["schemas"]["Event"];
+            /**
+             * Format: uri
+             * @description MVP: место сбора в Яндекс Картах; null, если у места сбора нет координат. Бэкенд MVP всегда передаёт поле; необязательно в схеме для совместимости
+             */
+            meeting_map_url?: string | null;
             application: components["schemas"]["Application"] | null;
             transfer: components["schemas"]["Transfer"] | null;
             /** @description Данные для перехода в такси (CAP-10) */
@@ -847,7 +893,7 @@ export interface components {
                 to: components["schemas"]["Point"];
                 /**
                  * Format: uri
-                 * @description MVP; null на pre-MVP или если у точек нет координат
+                 * @description MVP: заказ в Яндекс Go из `from` в `to`; null, если у одной из точек нет координат
                  */
                 yandex_go_url: string | null;
             };
@@ -882,7 +928,7 @@ export interface components {
         /** @enum {string} */
         HistoryAction: "application_submitted" | "application_updated" | "status_changed" | "marks_changed" | "transfer_created" | "transfer_joined" | "transfer_left" | "transfer_dissolved" | "transfer_departed" | "trip_updated";
         /** @enum {string} */
-        HistoryReason: "go_solo" | "cancel" | "resume_search" | "auto_match" | "auto_fill" | "incompatible_after_change" | "member_left" | "all_departed" | "admin_edit";
+        HistoryReason: "go_solo" | "cancel" | "resume_search" | "auto_match" | "auto_fill" | "incompatible_after_change" | "member_left" | "all_departed" | "admin_edit" | "application_changed" | "departure_undone" | "flight_cancelled" | "provider_update";
         /**
          * @description participant — сам участник, admin — создатель группы, system — сервис (подбор, пересчёт)
          * @enum {string}
@@ -1356,8 +1402,9 @@ export interface operations {
         parameters: {
             query: {
                 event_id: string;
+                /** @description Номер рейса в том же формате, что `TripInput.number`; регистр и пробел не важны */
                 number: string;
-                /** @description Дата вылета в таймзоне аэропорта вылета (уточняется — см. docs, «Поставщик и обновление») */
+                /** @description Дата вылета в часовом поясе аэропорта вылета */
                 date: string;
             };
             header?: never;
@@ -1366,7 +1413,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Найденные рейсы (уже сохранены в группе, можно сразу выбрать в заявке) */
+            /** @description Найденные рейсы (уже сохранены в группе, можно сразу выбрать в заявке); пустой список — не найдено */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -1376,7 +1423,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
             422: components["responses"]["ValidationError"];
             503: components["responses"]["ServiceUnavailable"];
         };
@@ -1726,6 +1773,7 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
             422: components["responses"]["ValidationError"];
         };
     };
@@ -1789,6 +1837,7 @@ export interface operations {
     adminGetBoard: {
         parameters: {
             query?: {
+                /** @description Фильтр по статусу рейса (можно несколько); неизвестное значение → 422 */
                 trip_status?: components["schemas"]["TripStatus"][];
             };
             header?: never;

@@ -302,6 +302,13 @@ paths:
       operationId: searchFlights
       tags: [trips]
       summary: Поиск авиарейса у поставщика по номеру и дате
+      description: |
+        Доступно участнику и админу группы; посторонний получает 404 NOT_FOUND.
+        Найденные рейсы сохраняются в группе с `source=provider`. Повторный поиск того же рейса не создаёт
+        дубль, а возвращает уже сохранённый рейс с обновлёнными данными.
+        Рейс, у которого аэропорта вылета или прилёта нет в справочнике `GET /locations`, в ответ не попадает.
+        Поставщик не настроен, недоступен или не ответил за 10 секунд → 503 FLIGHT_PROVIDER_UNAVAILABLE;
+        ручное добавление рейса админом при этом работает.
       x-stage: mvp
       parameters:
         - name: event_id
@@ -311,21 +318,22 @@ paths:
         - name: number
           in: query
           required: true
-          schema: { type: string, example: SU1234 }
+          description: Номер рейса в том же формате, что `TripInput.number`; регистр и пробел не важны
+          schema: { type: string, pattern: '^[A-Za-z0-9]{2,3}\s?\d{1,5}$', example: SU1234 }
         - name: date
           in: query
           required: true
-          description: Дата вылета в таймзоне аэропорта вылета (уточняется — см. docs, «Поставщик и обновление»)
+          description: Дата вылета в часовом поясе аэропорта вылета
           schema: { type: string, format: date }
       responses:
         '200':
-          description: Найденные рейсы (уже сохранены в группе, можно сразу выбрать в заявке)
+          description: Найденные рейсы (уже сохранены в группе, можно сразу выбрать в заявке); пустой список — не найдено
           content:
             application/json:
               schema:
                 type: array
                 items: { $ref: '#/components/schemas/Trip' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
         '422': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
@@ -357,9 +365,10 @@ paths:
         (вторая заявка не создаётся). Заявка в статусе `cancelled` при PUT возвращается в `searching`.
         Поле `seek_companions` задаёт статус явно: `false` → `solo` без подбора (так можно сразу
         создать заявку «еду самостоятельно»), `true` → `searching` с подбором.
-        pre-MVP: при статусе `assigned` → 409 APPLICATION_LOCKED (независимо от `seek_companions`).
-        MVP: изменение назначенной заявки — проверка совместимости, при несовместимости заявка выходит
-        из трансфера и снова ищет попутчиков.
+        MVP: заявку в статусе `assigned` тоже можно изменить. Если трансфер с новыми данными остаётся
+        совместимым и вмещает всех, заявка остаётся в нём. Иначе заявка выходит из трансфера, остальные
+        остаются вместе, сервис ищет им замену, а изменённая заявка снова проходит подбор
+        (`seek_companions=false` — получает `solo`). Ответ уже отражает итог.
         После «Уехал» → 409 ALREADY_DEPARTED.
       x-stage: pre-mvp
       requestBody:
@@ -379,7 +388,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Application' }
         '403': { $ref: '#/components/responses/Forbidden' }   # FORBIDDEN | PHONE_REQUIRED
-        '409': { $ref: '#/components/responses/Conflict' }    # APPLICATION_LOCKED | ALREADY_DEPARTED | CAPACITY_EXCEEDED
+        '409': { $ref: '#/components/responses/Conflict' }    # ALREADY_DEPARTED | CAPACITY_EXCEEDED
         '422': { $ref: '#/components/responses/ValidationError' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
@@ -453,9 +462,13 @@ paths:
       summary: Отметки «Я на месте» / «Уехал» (CAP-08). Отметка автора относится и к спутнику
       description: |
         Передаются только меняемые поля.
-        pre-MVP: `departed=true` необратимо — `departed=false` после отъезда → 409 ALREADY_DEPARTED.
-        MVP: исправление ошибочного «Уехал» по согласованному правилу.
+        MVP: ошибочное «Уехал» можно отменить (`departed=false`) в течение 30 минут после отметки.
+        Если прежний трансфер ещё активен, заявка возвращается в него; если трансфера уже нет, заявка
+        получает `searching` и снова проходит подбор; заявка `solo` остаётся `solo`.
+        Позже 30 минут `departed=false` → 409 ALREADY_DEPARTED. Повтор `departed=true` идемпотентен.
+        Пока стоит «Уехал», `at_meeting_point` менять нельзя → 409 ALREADY_DEPARTED.
         Отметка «Уехал» на заявке в трансфере не отмечает остальных попутчиков.
+        Заявка в статусе `cancelled` → 409 APPLICATION_LOCKED.
       x-stage: pre-mvp
       requestBody:
         required: true
@@ -470,7 +483,7 @@ paths:
               schema: { $ref: '#/components/schemas/Application' }
         '403': { $ref: '#/components/responses/Forbidden' }    # не участник группы (админ без участия)
         '404': { $ref: '#/components/responses/NotFound' }
-        '409': { $ref: '#/components/responses/Conflict' }
+        '409': { $ref: '#/components/responses/Conflict' }    # ALREADY_DEPARTED | APPLICATION_LOCKED
         '401': { $ref: '#/components/responses/Unauthorized' }
         '422': { $ref: '#/components/responses/ValidationError' }
 
@@ -548,6 +561,15 @@ paths:
       operationId: adminCreateTransfer
       tags: [admin]
       summary: Создать трансфер вручную из заявок
+      description: |
+        Минимум две заявки группы в статусе `searching` или `assigned` без отметки «Уехал».
+        Правила те же, что в автоподборе: один аэропорт прилёта, ожидание каждого, не больше 3 пассажиров
+        и 2 единиц багажа. Заявка из другого трансфера сначала выходит из него; прежний трансфер
+        дополняется по обычным правилам или расформировывается.
+        Ручной трансфер сервис сам не дополняет.
+        409: `INCOMPATIBLE_TRANSFER` — разные аэропорты или время не сходится; `CAPACITY_EXCEEDED` — мест
+        или багажа не хватает; `ALREADY_DEPARTED` — у заявки стоит «Уехал».
+        422: меньше двух заявок, повтор id, заявка не из этой группы, в статусе `solo` или `cancelled`.
       x-stage: mvp
       requestBody:
         required: true
@@ -561,7 +583,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Transfer' }
         '403': { $ref: '#/components/responses/Forbidden' }
-        '409': { $ref: '#/components/responses/Conflict' }    # INCOMPATIBLE_TRANSFER | CAPACITY_EXCEEDED
+        '409': { $ref: '#/components/responses/Conflict' }    # INCOMPATIBLE_TRANSFER | CAPACITY_EXCEEDED | ALREADY_DEPARTED
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
         '422': { $ref: '#/components/responses/ValidationError' }
@@ -575,8 +597,11 @@ paths:
       tags: [admin]
       summary: Задать состав трансфера целиком (до отъезда)
       description: |
-        Проверяются те же правила, что и в автоподборе. Исключённые заявки возвращаются в `searching`.
-        Пустой список расформировывает трансфер.
+        Проверяются те же правила и ошибки, что в `POST /admin/transfers`. После правки трансфер считается
+        ручным и сам не дополняется. Убранные из состава заявки получают `searching` и снова проходят подбор.
+        Пустой список расформировывает трансфер: ответ — трансфер с пустым `members`, повторный запрос → 404.
+        Список из одной заявки → 422.
+        Трансфер в статусе `departed` → 409 ALREADY_DEPARTED. Трансфер из другой группы → 404.
       x-stage: mvp
       requestBody:
         required: true
@@ -590,7 +615,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Transfer' }
         '403': { $ref: '#/components/responses/Forbidden' }
-        '409': { $ref: '#/components/responses/Conflict' }
+        '409': { $ref: '#/components/responses/Conflict' }    # INCOMPATIBLE_TRANSFER | CAPACITY_EXCEEDED | ALREADY_DEPARTED
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
         '422': { $ref: '#/components/responses/ValidationError' }
@@ -603,6 +628,11 @@ paths:
       operationId: adminMarkApplicationDeparted
       tags: [admin]
       summary: Админ отмечает отъезд заявки
+      description: |
+        Ставит «Уехал» так же, как участник (`PUT .../marks` с `departed=true`): отметка относится и к спутнику,
+        статус заявки не меняется, попутчики по трансферу не отмечаются. Если уехали все участники трансфера,
+        он получает статус `departed`. Повтор идемпотентен и не меняет момент отъезда.
+        Заявка в статусе `cancelled` → 409 APPLICATION_LOCKED. Заявка из другой группы → 404.
       x-stage: mvp
       responses:
         '200':
@@ -611,6 +641,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Application' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }    # APPLICATION_LOCKED
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
         '422': { $ref: '#/components/responses/ValidationError' }
@@ -623,6 +654,9 @@ paths:
       operationId: adminMarkTransferDeparted
       tags: [admin]
       summary: Админ отмечает отъезд всего трансфера
+      description: |
+        Ставит «Уехал» всем участникам трансфера, у кого его ещё нет; трансфер получает статус `departed`.
+        Повтор идемпотентен. Трансфер из другой группы → 404.
       x-stage: mvp
       responses:
         '200':
@@ -669,10 +703,15 @@ paths:
       operationId: adminGetBoard
       tags: [admin]
       summary: Табло рейсов группы со сводными количествами
+      description: |
+        Рейсы группы, на которые ссылается хотя бы одна заявка не в статусе `cancelled`, по возрастанию
+        `effective_arrival`. `people` и `counters` считают людей со спутниками; `cancelled` не входит в `expected`.
+        `counters` считаются по рейсам после фильтра `trip_status`. Без фильтра — все рейсы.
       x-stage: mvp
       parameters:
         - name: trip_status
           in: query
+          description: Фильтр по статусу рейса (можно несколько); неизвестное значение → 422
           schema:
             type: array
             items: { $ref: '#/components/schemas/TripStatus' }
@@ -803,8 +842,12 @@ components:
       required: [address]
       properties:
         address: { type: string, minLength: 1, maxLength: 500 }
-        lat: { type: [number, 'null'], description: 'MVP: для ссылки на карту и Яндекс Go' }
-        lon: { type: [number, 'null'] }
+        lat:
+          type: [number, 'null']
+          minimum: -90
+          maximum: 90
+          description: 'MVP: для ссылки на карту и Яндекс Go. Передаются обе координаты или ни одной, иначе 422'
+        lon: { type: [number, 'null'], minimum: -180, maximum: 180 }
 
     # ------------------------------------------------------------ профиль
     Contact:
@@ -1131,6 +1174,10 @@ components:
       required: [event, application, transfer, taxi]
       properties:
         event: { $ref: '#/components/schemas/Event' }
+        meeting_map_url:
+          type: [string, 'null']
+          format: uri
+          description: 'MVP: место сбора в Яндекс Картах; null, если у места сбора нет координат. Бэкенд MVP всегда передаёт поле; необязательно в схеме для совместимости'
         application:
           oneOf:
             - $ref: '#/components/schemas/Application'
@@ -1149,7 +1196,7 @@ components:
             yandex_go_url:
               type: [string, 'null']
               format: uri
-              description: 'MVP; null на pre-MVP или если у точек нет координат'
+              description: 'MVP: заказ в Яндекс Go из `from` в `to`; null, если у одной из точек нет координат'
 
     # ------------------------------------------------------------ админ
     AdminParticipant:
@@ -1211,7 +1258,8 @@ components:
     HistoryReason:
       type: string
       enum: [go_solo, cancel, resume_search, auto_match, auto_fill, incompatible_after_change,
-             member_left, all_departed, admin_edit]
+             member_left, all_departed, admin_edit, application_changed, departure_undone,
+             flight_cancelled, provider_update]
 
     ActorKind:
       type: string
