@@ -144,15 +144,18 @@ UPDATE notifications SET status = 'pending', attempts = 0, run_after = now() WHE
 
 1. Сохранить дамп: `sudo docker exec db pg_dump -U fellow -d fellow_travelers | gzip > ~/pre-rollback.sql.gz`.
 2. Откатить схему новым образом до ревизии старого релиза:
-   - релиз MVP → релиз с историей и воркером: `0004`. Сначала убрать записи истории с причинами MVP: старый
-     код их не знает, а миграция `0005` не вернёт старое ограничение, пока они есть. Таблица истории
-     защищена триггером «только добавление», поэтому на время удаления он отключается:
+   - релиз MVP → релиз с историей и воркером: `0004`. Сначала остановить `worker` и `bot`
+     (`sudo docker stop worker bot`): новый код пишет историю с причинами MVP до самого revert. Затем у
+     записей истории с причинами MVP обнулить причину: старый код их не знает, а миграция `0005` не вернёт
+     старое ограничение, пока они есть. Строки остаются, поэтому составы трансферов по истории
+     восстанавливаются, как раньше. Таблица истории защищена триггером «только добавление», поэтому на время
+     правки он отключается:
 
      ```bash
      sudo docker exec -i db psql -U fellow -d fellow_travelers <<'SQL'
      BEGIN;
      ALTER TABLE audit_log DISABLE TRIGGER audit_log_append_only;
-     DELETE FROM audit_log WHERE reason IN
+     UPDATE audit_log SET reason = NULL WHERE reason IN
        ('application_changed', 'departure_undone', 'flight_cancelled', 'provider_update');
      ALTER TABLE audit_log ENABLE TRIGGER audit_log_append_only;
      COMMIT;
@@ -160,8 +163,10 @@ UPDATE notifications SET status = 'pending', attempts = 0, run_after = now() WHE
      sudo docker exec api alembic downgrade 0004
      ```
 
-     Удаляются таблица `notifications` (неотправленные уведомления пропадут), поля опроса рейсов и
-     `applications.departed_from_transfer_id`. Заявки, трансферы и рейсы остаются.
+     Если `downgrade` упал на проверке `ck_audit_log_audit_reason` (успела появиться новая запись), схема
+     остаётся прежней: повторите SQL и `downgrade`. Удаляются таблица `notifications` (неотправленные
+     уведомления пропадут), поля опроса рейсов и `applications.departed_from_transfer_id`. Заявки, трансферы
+     и рейсы остаются.
    - релиз с историей и воркером → pre-MVP: `sudo docker exec api alembic downgrade 0002`. Таблицы
      `audit_log` и `background_jobs` удаляются вместе с данными: история с момента обновления пропадёт, она
      остаётся только в дампе.
