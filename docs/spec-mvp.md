@@ -229,7 +229,8 @@ sequenceDiagram
     participant W as Worker
     participant R as Relay
     participant TG as Telegram
-    S->>DB: изменение, аудит, notify() в той же транзакции
+    S->>DB: изменение и записи истории
+    S->>DB: before_commit: планировщик строит notifications из записей истории
     W->>DB: pending, run_after <= now, FOR UPDATE SKIP LOCKED, до 20
     W->>R: sendMessage, кнопка startapp=event_id
     R->>TG: запрос с токеном бота
@@ -244,12 +245,16 @@ sequenceDiagram
 
 | Элемент | Вход | Выход | Побочные эффекты и ошибки |
 | --- | --- | --- | --- |
-| `services/notifications.notify` | `session`, `user_id`, `event_id`, `kind`, `payload`, `dedupe_key` | `None` | Только `session.add`; повтор с тем же ключом в той же транзакции не создаёт второе сообщение (`ON CONFLICT DO NOTHING`) |
+| `services/notifications.plan_notifications` | синхронная `Session` перед commit; записи истории транзакции из `session.info["fellow_audit_pending"]` | `None` | Обработчик `before_commit` (`app/db.py`), пропускает savepoint. Адресаты по текущему состоянию внутри транзакции; `INSERT ... ON CONFLICT (user_id, dedupe_key) DO NOTHING` |
+| `services/notifications.notify` | `session`, `user_id`, `event_id`, `kind`, `payload`, `dedupe_key` | `None` | Прямая запись, только для `points_changed`: у правки группы нет записи истории |
 | `kind` | — | `transfer_assigned`, `transfer_changed`, `transfer_left`, `points_changed`, `flight_changed`, `flight_cancelled` | Адресаты по Д9, порог по Д10 |
 | Отправитель в воркере | Строки `notifications` | Статус `sent`, `skipped` или `failed` | После 8 неудач — `failed`, ERROR-лог. `TelegramRetryAfter` — пауза из ответа. В логе нет телефона, текста сообщения и токена |
 
-Одно действие даёт одному пользователю одно сообщение: `dedupe_key` строится из вида события и номера записи
-аудита. Воркер получает `BOT_TOKEN` и настройки relay в обоих compose.
+Одна транзакция даёт одному пользователю одно сообщение: при нескольких видах берётся самый важный
+(`transfer_assigned` > `transfer_left` > `flight_cancelled` > `transfer_changed` > `flight_changed`);
+`dedupe_key` — вид и наименьший номер записи истории. Пользователь, который сам действовал в транзакции,
+сообщений по ней не получает. База порога Д10 — `trips.notified_arrival`; если пусто, в него сначала
+записывается прибытие до первой правки. Воркер получает `BOT_TOKEN` и настройки relay в обоих compose.
 
 ## M-05. Карты и Яндекс Go (CAP-08, CAP-10)
 
