@@ -220,6 +220,29 @@ sequenceDiagram
 Настройки: `FLIGHT_PROVIDER` (`none` по умолчанию, `fake`, позже имя реального адаптера), ключ поставщика —
 секрет деплоя. Ручная правка рейса админом остаётся; следующий ответ поставщика её перезаписывает (CAP-05).
 
+### M-01a. Адаптер AeroDataBox (T12)
+
+Выбор (2026-11-17): AeroDataBox. Покрытие России по данным поставщика (страница data-coverage): расписания 100 %,
+живые статусы 74 %; живые данные есть в SVO, DME, VKO, LED, AER, KZN, OVB, SVX, MRV, в KRR только расписание.
+Ограничение — оплата: RapidAPI Россию запрещает, прямая подписка идёт через Polar.sh, который не принимает
+оплату из России; API.Market (США) требует нероссийскую карту. Ключ покупает владелец продукта.
+
+| Элемент | Решение |
+| --- | --- |
+| Настройки | `FLIGHT_PROVIDER=aerodatabox`; `AERODATABOX_API_KEY` (секрет, обязателен при этом поставщике — без него сервис не стартует с понятной ошибкой без значения ключа); `AERODATABOX_GATEWAY=apimarket` (по умолчанию), `direct` или `rapidapi` |
+| Шлюзы | direct: `https://api.aerodatabox.com`, заголовок `X-Api-Key`; apimarket: `https://prod.api.market/api/v1/aedbx/aerodatabox`, заголовок `x-api-market-key`; rapidapi: `https://aerodatabox.p.rapidapi.com`, заголовки `X-RapidAPI-Key` и `X-RapidAPI-Host: aerodatabox.p.rapidapi.com` |
+| Поиск | `GET /flights/Number/{number}/{dateLocal}?dateLocalRole=Departure&withAircraftImage=false&withLocation=false`; 200 — массив рейсов, 204 — не найдено (пустой список) |
+| Отбор | Без грузовых (`isCargo`); при нескольких записях одного рейса — оператор (`codeshareStatus = IsOperator`), затем запись, номер которой совпадает с запрошенным; многосегментный рейс даёт по записи на сегмент |
+| `provider_ref` | `adb:{НОМЕР}:{дата вылета по местному времени}:{IATA вылета}` — у AeroDataBox нет id рейса; `fetch` повторяет поиск по номеру и дате и берёт запись с тем же аэропортом вылета |
+| Время | `scheduledTime.utc` вылета и прилёта; расчётное прибытие — первое из `revisedTime`, `runwayTime`, `predictedTime` прилёта; разбор допускает `2026-11-17 10:59Z` и ISO 8601 |
+| Статус | `Unknown`, `Expected`, `CheckIn`, `Boarding`, `GateClosed` → `scheduled` (или `delayed`, если расчётное прибытие позже расписания на 15 минут и больше); `Delayed` → `delayed`; `Departed`, `EnRoute`, `Approaching` → `departed`; `Arrived` → `landed`; `Canceled` → `cancelled`; `CanceledUncertain`, `Diverted` → `unknown` (без вывода пассажиров) |
+| Ошибки | Таймаут 10 с, сеть, 401, 403, 429, 451, 5xx, ответ не по схеме → `ProviderUnavailableError`; 400 → пустой список с WARNING. В логах только код ответа и имя класса ошибки, без ключа и номера рейса |
+| Расход | Запрос стоит 2 единицы. Оценка: рейс, найденный за 7 суток, опрашивается по Д2 примерно 190 раз — около 380 единиц; 30 рейсов в месяц — около 11 400 единиц (API.Market Pro 2, 15 000 единиц за 15 $) |
+
+Ответы поставщика в тестах — записанные по официальной OpenAPI-схеме примеры; проверка на живых данных
+возможна только с ключом: первый запрос с ВМ — проверка `GET /health/services/airports/UUEE/feeds` (0 единиц) и
+поиск одного рейса SU.
+
 ## M-04. Уведомления (CAP-02, CAP-12)
 
 ```mermaid
@@ -358,7 +381,7 @@ flowchart TD
 | T9 | Таблица `notifications`, `notify()` во всех точках изменений | `0008` |
 | T10 | Отправитель в воркере, тексты сообщений, compose | — |
 | T11 | M-06 под флагом | — |
-| T12 | Адаптер выбранного поставщика | — |
+| T12 | Адаптер AeroDataBox (M-01a) | — |
 | T13 | API-тест шагов «Проверка MVP», которые относятся к бэкенду, включая аватар и закрытие вступления; `docker compose` со сквозным сценарием | — |
 
 Волны: сначала T1b; T2, T6 и T7 независимы и идут параллельно; затем T3 и T8; затем T4, T5 после T4; затем T9, T10 и T11;
