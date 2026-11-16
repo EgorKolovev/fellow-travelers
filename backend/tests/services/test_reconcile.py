@@ -14,7 +14,7 @@ from typing import Any
 from hypothesis import HealthCheck, given, settings
 from hypothesis import event as event_stats
 from hypothesis import strategies as st
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -29,11 +29,13 @@ from app.models import (
     TransferOrigin,
     TransferStatus,
     Trip,
+    TripStatus,
 )
 from app.services.audit import SYSTEM, Actor, record
 from app.services.matching import (
     ReconcileResult,
     all_departed,
+    fits_current_transfer,
     mark_transfer_departed,
     match_application,
     reconcile_event,
@@ -454,6 +456,7 @@ class _Spec:
     departed: bool
     new_minutes: int | None
     new_airport: str | None
+    cancelled: bool
 
 
 _SPECS = st.builds(
@@ -466,6 +469,7 @@ _SPECS = st.builds(
     departed=st.sampled_from([False, False, False, True]),
     new_minutes=st.one_of(st.none(), st.integers(-30, 80)),
     new_airport=st.one_of(st.none(), st.sampled_from(["SVO", "DME"])),
+    cancelled=st.sampled_from([False, False, False, True]),
 )
 
 
@@ -505,6 +509,9 @@ async def _check_second_reconcile_is_noop(session: AsyncSession, specs: list[_Sp
         if spec.new_airport is not None:
             trip.arrival_location_id = (await get_location(session, spec.new_airport)).id
             changed.add(trip.id)
+        if spec.cancelled:
+            trip.status = TripStatus.CANCELLED
+            changed.add(trip.id)
     await session.flush()
 
     first = await reconcile_event(session, event.id, changed_trip_ids=frozenset(changed))
@@ -514,9 +521,28 @@ async def _check_second_reconcile_is_noop(session: AsyncSession, specs: list[_Sp
 
     await assert_history_matches_transfers(session, event.id)
     await _assert_waiting_members_are_compatible(session, event.id)
+    await _assert_no_waiting_member_on_cancelled_trip(session, event.id)
     before = await _snapshot(session, event.id)
     assert await reconcile_event(session, event.id, changed_trip_ids=frozenset(changed)) == NOTHING
     assert await _snapshot(session, event.id) == before
+
+
+async def _assert_no_waiting_member_on_cancelled_trip(
+    session: AsyncSession, event_id: uuid.UUID
+) -> None:
+    """Д8: ждущая заявка с отменённым рейсом не сидит в трансфере."""
+    placed = await session.scalar(
+        select(func.count())
+        .select_from(Application)
+        .join(Trip, Trip.id == Application.trip_id)
+        .where(
+            Application.event_id == event_id,
+            Application.transfer_id.is_not(None),
+            Application.departed_at.is_(None),
+            Trip.status == TripStatus.CANCELLED,
+        )
+    )
+    assert placed == 0
 
 
 async def _assert_waiting_members_are_compatible(
@@ -580,3 +606,108 @@ def test_second_reconcile_changes_nothing_on_random_groups(
     migrated_database: str, specs: list[_Spec]
 ) -> None:
     asyncio.run(_run_isolated(migrated_database, specs))
+
+
+# ---------------------------------------------------------------- Д8: отменённый рейс
+
+
+async def _cancel(session: AsyncSession, trip: Trip) -> None:
+    trip.status = TripStatus.CANCELLED
+    await session.flush()
+
+
+async def test_cancelled_flight_passengers_leave_and_others_stay(
+    db_session: AsyncSession,
+) -> None:
+    event = await make_event(db_session)
+    first, second, third, transfer_id = await _triple(db_session, event.id)
+    trip = await _trip_of(db_session, third)
+    await _cancel(db_session, trip)
+
+    result = await _reconcile(db_session, event.id, trip)
+
+    assert result == ReconcileResult(excluded=1, dissolved=0, placed=0)
+    assert (third.status, third.transfer_id) == (ApplicationStatus.SEARCHING, None)
+    for stayed in (first, second):
+        assert (stayed.status, stayed.transfer_id) == (ApplicationStatus.ASSIGNED, transfer_id)
+    left = (await audit_rows(db_session, event.id))[-1]
+    assert _brief(left) == ("transfer_left", "flight_cancelled", "system")
+    assert left.trip_id == trip.id
+    await assert_history_matches_transfers(db_session, event.id)
+    await _assert_rerun_changes_nothing(db_session, event.id, trip)
+
+
+async def test_cancelled_flight_dissolves_pair(db_session: AsyncSession) -> None:
+    event = await make_event(db_session)
+    first = await _app(db_session, event.id)
+    second = await _app(db_session, event.id)
+    assert await match_application(db_session, second) is not None
+    trip = await _trip_of(db_session, first)
+    await _cancel(db_session, trip)
+
+    result = await _reconcile(db_session, event.id, trip)
+
+    assert result.dissolved == 1
+    for member in (first, second):
+        assert (member.status, member.transfer_id) == (ApplicationStatus.SEARCHING, None)
+    # оставшийся не подбирается к отменённому: оба ждут
+    await _assert_rerun_changes_nothing(db_session, event.id, trip)
+    await assert_history_matches_transfers(db_session, event.id)
+
+
+async def test_cancelled_applications_are_not_matched(db_session: AsyncSession) -> None:
+    event = await make_event(db_session)
+    first = await _app(db_session, event.id)
+    trip = await _trip_of(db_session, first)
+    await _cancel(db_session, trip)
+    second = await _app(db_session, event.id)
+
+    assert await match_application(db_session, first) is None  # сама отменена
+    assert await match_application(db_session, second) is None  # пара только с отменённой
+    assert await _reconcile(db_session, event.id, trip) == NOTHING
+    assert (first.status, second.status) == (ApplicationStatus.SEARCHING,) * 2
+
+
+async def test_transfer_with_cancelled_member_is_not_joined(db_session: AsyncSession) -> None:
+    event = await make_event(db_session)
+    first = await _app(db_session, event.id)
+    second = await _app(db_session, event.id)
+    assert await match_application(db_session, second) is not None
+    await _cancel(db_session, await _trip_of(db_session, first))  # без пересчёта
+    third = await _app(db_session, event.id)
+
+    assert await match_application(db_session, third) is None
+    assert third.transfer_id is None
+
+
+async def test_uncancelling_flight_places_applications_again(db_session: AsyncSession) -> None:
+    event = await make_event(db_session)
+    first = await _app(db_session, event.id)
+    second = await _app(db_session, event.id)
+    assert await match_application(db_session, second) is not None
+    trip = await _trip_of(db_session, first)
+    await _cancel(db_session, trip)
+    await _reconcile(db_session, event.id, trip)
+    assert first.transfer_id is None
+
+    trip.status = TripStatus.SCHEDULED
+    await db_session.flush()
+    result = await _reconcile(db_session, event.id, trip)
+
+    assert result.placed == 2
+    assert first.transfer_id is not None
+    assert first.transfer_id == second.transfer_id
+    await assert_history_matches_transfers(db_session, event.id)
+
+
+async def test_fits_current_transfer_is_false_for_cancelled_flight(
+    db_session: AsyncSession,
+) -> None:
+    event = await make_event(db_session)
+    first = await _app(db_session, event.id)
+    second = await _app(db_session, event.id)
+    assert await match_application(db_session, second) is not None
+    assert await fits_current_transfer(db_session, first)
+    await _cancel(db_session, await _trip_of(db_session, first))
+
+    assert not await fits_current_transfer(db_session, first)

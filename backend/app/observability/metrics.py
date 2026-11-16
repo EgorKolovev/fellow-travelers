@@ -3,7 +3,7 @@
 Идентификаторов и значений из пути (invite-код, uuid) в лейблах нет: `route` — шаблон маршрута,
 `method` — из списка стандартных методов, `status` — число, остальные лейблы — значения
 закрытых `StrEnum` (триггер и вид размещения ниже, `AuditReason`, `JobKind`, `JobOutcome`,
-`JobStatus`). Иначе число рядов росло бы без границы.
+`JobStatus`, `FlightPollOutcome`). Иначе число рядов росло бы без границы.
 
 Счётчики подбора и воркера обновляются после commit (см. `app.observability.deferred`), поэтому
 откатившийся сценарий их не меняет.
@@ -78,6 +78,23 @@ worker_job_duration_seconds = Histogram(
     "ft_worker_job_duration_seconds",
     "Длительность попытки выполнить фоновое задание, секунды",
     ["kind"],
+)
+
+
+class FlightPollOutcome(StrEnum):
+    """Чем кончился опрос одного рейса у поставщика."""
+
+    CHANGED = "changed"
+    UNCHANGED = "unchanged"
+    MISSING = "missing"
+    UNAVAILABLE = "unavailable"
+    ERROR = "error"
+
+
+flight_polls_total = Counter(
+    "ft_flight_polls_total",
+    "Опросы рейсов у поставщика по исходу",
+    ["outcome"],
 )
 worker_queue_depth = Gauge(
     "ft_worker_queue_depth",

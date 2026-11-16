@@ -9,9 +9,20 @@ from sqlalchemy.orm import selectinload
 
 from app.errors import AppError, ErrorCode
 from app.flights.provider import FlightProvider, ProviderFlight, ProviderUnavailableError
-from app.models import Location, LocationKind, TransportMode, Trip, TripSource, User
+from app.models import (
+    AuditAction,
+    AuditReason,
+    Location,
+    LocationKind,
+    TransportMode,
+    Trip,
+    TripSource,
+    TripStatus,
+    User,
+)
 from app.schemas.trip import normalize_number
 from app.services.access import get_event_for_member
+from app.services.audit import SYSTEM, iso, record
 from app.services.jobs import enqueue_reconcile
 from app.services.matching import lock_event
 
@@ -47,6 +58,96 @@ async def _airports(session: AsyncSession, flights: list[ProviderFlight]) -> dic
     return {location.code: location for location in await session.scalars(stmt)}
 
 
+# поля рейса, чьи изменения попадают в `trip_updated.changed_fields`, в порядке модели
+_UPDATE_FIELDS = (
+    "number",
+    "departure_location_id",
+    "arrival_location_id",
+    "scheduled_departure",
+    "scheduled_arrival",
+    "estimated_arrival",
+    "status",
+)
+
+
+async def apply_update(session: AsyncSession, trip: Trip, flight: ProviderFlight) -> bool:
+    """Применяет данные поставщика к рейсу; True, если рейс изменился. Только flush.
+
+    Вызывать под `lock_event` группы, с рейсом, свежим из БД. Сравнение идёт с текущими
+    значениями в БД, поэтому ответ поставщика перезаписывает и ручную правку админа (CAP-05).
+    Аэропорт, которого нет в справочнике, не применяется (WARNING с кодами, без номера рейса),
+    остальные поля применяются. Без изменений ничего не пишется: ни истории, ни задания.
+    При изменениях `source=provider`, пишется `trip_updated` от системы с причиной
+    `provider_update`; если изменились расчётное прибытие, аэропорт прилёта или рейс стал
+    отменённым либо перестал быть таковым, ставится пересчёт трансферов группы.
+    """
+    airports = await _airports(session, [flight])
+    departure_id = trip.departure_location_id
+    arrival_id = trip.arrival_location_id
+    departure = airports.get(flight.departure_iata)
+    arrival = airports.get(flight.arrival_iata)
+    if departure is None:
+        logger.warning(
+            "Обновление рейса: аэропорта вылета нет в справочнике (%s)", flight.departure_iata
+        )
+    else:
+        departure_id = departure.id
+    if arrival is None:
+        logger.warning(
+            "Обновление рейса: аэропорта прилёта нет в справочнике (%s)", flight.arrival_iata
+        )
+    else:
+        arrival_id = arrival.id
+    if flight.scheduled_arrival <= flight.scheduled_departure:
+        logger.warning(
+            "Обновление рейса пропущено: прилёт не позже вылета (%s -> %s)",
+            flight.departure_iata,
+            flight.arrival_iata,
+        )
+        return False
+
+    new_values = {
+        "number": flight.number,
+        "departure_location_id": departure_id,
+        "arrival_location_id": arrival_id,
+        "scheduled_departure": flight.scheduled_departure,
+        "scheduled_arrival": flight.scheduled_arrival,
+        "estimated_arrival": flight.estimated_arrival,
+        "status": flight.status,
+    }
+    before = {name: getattr(trip, name) for name in _UPDATE_FIELDS}
+    changed_fields = [name for name in _UPDATE_FIELDS if new_values[name] != before[name]]
+    if not changed_fields:
+        return False
+    arrival_before = trip.effective_arrival
+    for name in changed_fields:
+        setattr(trip, name, new_values[name])
+    trip.source = TripSource.PROVIDER
+    await session.flush()
+    was_cancelled = before["status"] == TripStatus.CANCELLED
+    is_cancelled = trip.status == TripStatus.CANCELLED
+    if (
+        trip.effective_arrival != arrival_before
+        or "arrival_location_id" in changed_fields
+        or was_cancelled != is_cancelled
+    ):
+        await enqueue_reconcile(session, event_id=trip.event_id, trip_id=trip.id)
+    record(
+        session,
+        event_id=trip.event_id,
+        action=AuditAction.TRIP_UPDATED,
+        actor=SYSTEM,
+        reason=AuditReason.PROVIDER_UPDATE,
+        trip_id=trip.id,
+        details={
+            "changed_fields": changed_fields,
+            "effective_arrival_before": iso(arrival_before),
+            "effective_arrival_after": iso(trip.effective_arrival),
+        },
+    )
+    return True
+
+
 async def _save(
     session: AsyncSession,
     event_id: uuid.UUID,
@@ -54,43 +155,49 @@ async def _save(
     departure: Location,
     arrival: Location,
 ) -> Trip:
-    """Рейс поставщика в группе: уже сохранённый не трогаем, ручной усыновляем, иначе создаём."""
+    """Рейс поставщика в группе: сохранённый обновляем, ручной усыновляем, иначе создаём."""
     existing = await session.scalar(
-        select(Trip).where(Trip.event_id == event_id, Trip.provider_ref == flight.provider_ref)
+        select(Trip)
+        .where(Trip.event_id == event_id, Trip.provider_ref == flight.provider_ref)
+        .execution_options(populate_existing=True)
     )
     if existing is not None:
-        return existing  # обновление данных рейса — задача опроса в воркере
+        await apply_update(session, existing, flight)
+        return existing
     manual = await session.scalar(
-        select(Trip).where(
+        select(Trip)
+        .where(
             Trip.event_id == event_id,
             Trip.mode == TransportMode.FLIGHT,
             Trip.number == flight.number,
             Trip.scheduled_departure == flight.scheduled_departure,
         )
+        .execution_options(populate_existing=True)
     )
-    now = datetime.now(UTC)
-    if manual is None:
-        trip = Trip(event_id=event_id, mode=TransportMode.FLIGHT)
-        session.add(trip)
-    else:
-        trip = manual
-    arrival_before = trip.effective_arrival if manual is not None else None
-    arrival_location_before = trip.arrival_location_id if manual is not None else None
-    trip.number = flight.number
-    trip.departure_location_id = departure.id
-    trip.arrival_location_id = arrival.id
-    trip.scheduled_departure = flight.scheduled_departure
-    trip.scheduled_arrival = flight.scheduled_arrival
-    trip.estimated_arrival = flight.estimated_arrival
-    trip.status = flight.status
-    trip.source = TripSource.PROVIDER
-    trip.provider_ref = flight.provider_ref
-    trip.next_poll_at = now  # опрос в воркере подхватит рейс сразу
+    if manual is not None:
+        # данные пишет apply_update, чтобы в истории осталась запись о том, что поменялось
+        manual.provider_ref = flight.provider_ref
+        manual.source = TripSource.PROVIDER
+        manual.next_poll_at = datetime.now(UTC)  # опрос в воркере подхватит рейс сразу
+        await session.flush()
+        await apply_update(session, manual, flight)
+        return manual
+    trip = Trip(
+        event_id=event_id,
+        mode=TransportMode.FLIGHT,
+        number=flight.number,
+        departure_location_id=departure.id,
+        arrival_location_id=arrival.id,
+        scheduled_departure=flight.scheduled_departure,
+        scheduled_arrival=flight.scheduled_arrival,
+        estimated_arrival=flight.estimated_arrival,
+        status=flight.status,
+        source=TripSource.PROVIDER,
+        provider_ref=flight.provider_ref,
+        next_poll_at=datetime.now(UTC),  # опрос в воркере подхватит рейс сразу
+    )
+    session.add(trip)
     await session.flush()
-    if manual is not None and (
-        trip.effective_arrival != arrival_before or arrival.id != arrival_location_before
-    ):
-        await enqueue_reconcile(session, event_id=event_id, trip_id=trip.id)
     return trip
 
 

@@ -6,8 +6,9 @@ from prometheus_client import start_http_server
 
 from app.config import get_settings
 from app.db import dispose_engine
+from app.flights import build_provider
 from app.observability.logging import configure_logging
-from app.worker import run
+from app.worker import run, run_flight_polling
 
 logger = logging.getLogger("app.worker")
 
@@ -30,7 +31,12 @@ async def main() -> None:
     metrics_server, _ = start_http_server(settings.worker_metrics_port)
     logger.info("Воркер запущен, метрики на порту %d", settings.worker_metrics_port)
     try:
-        await run(stop)
+        provider = build_provider(settings)
+        if provider is None:
+            logger.info("Поставщик рейсов не настроен: опрос рейсов не запускается")
+            await run(stop)
+        else:
+            await asyncio.gather(run(stop), run_flight_polling(stop, provider))
     finally:
         metrics_server.shutdown()
         await dispose_engine()

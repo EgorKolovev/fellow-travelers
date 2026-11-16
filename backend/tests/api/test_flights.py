@@ -16,6 +16,7 @@ from app.models import BackgroundJob, Event, Trip, TripSource, TripStatus, User
 from app.services import flights as flights_service
 from tests.api.conftest import auth_headers
 from tests.factories import get_location, make_event, make_membership, make_trip
+from tests.helpers.audit_replay import audit_rows
 from tests.helpers.contract import assert_contract
 
 DAY = date(2026, 11, 12)
@@ -96,13 +97,27 @@ async def test_repeated_search_does_not_duplicate(
     api_client: AsyncClient, db_session: AsyncSession, event: Event, fake: FakeFlightProvider
 ) -> None:
     first = (await search(api_client, event.id)).json()
-    fake.add(provider_flight(status=TripStatus.CANCELLED))  # данные меняются только опросом (T8)
 
     second = (await search(api_client, event.id)).json()
 
     assert [t["id"] for t in second] == [t["id"] for t in first]
-    assert second[0]["status"] == "delayed"
     assert len(await trips_in(db_session, event.id)) == 1
+    assert await audit_rows(db_session, event.id) == []  # данные те же: истории нет
+
+
+async def test_repeated_search_returns_updated_data_and_writes_history(
+    api_client: AsyncClient, db_session: AsyncSession, event: Event, fake: FakeFlightProvider
+) -> None:
+    first = (await search(api_client, event.id)).json()
+    fake.add(provider_flight(status=TripStatus.CANCELLED))
+
+    second = (await search(api_client, event.id)).json()
+
+    assert [t["id"] for t in second] == [t["id"] for t in first]
+    assert second[0]["status"] == "cancelled"
+    assert len(await trips_in(db_session, event.id)) == 1
+    (row,) = await audit_rows(db_session, event.id)
+    assert (row.action, row.reason, row.actor_kind) == ("trip_updated", "provider_update", "system")
 
 
 async def test_manual_trip_with_same_key_is_adopted(
@@ -134,6 +149,9 @@ async def test_manual_trip_with_same_key_is_adopted(
         select(func.count()).select_from(BackgroundJob).where(BackgroundJob.event_id == event.id)
     )
     assert jobs == 1
+    (row,) = await audit_rows(db_session, event.id)
+    assert (row.action, row.reason, row.actor_kind) == ("trip_updated", "provider_update", "system")
+    assert row.trip_id == manual.id
 
 
 async def test_unknown_airport_skips_flight_with_warning(

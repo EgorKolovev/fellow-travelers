@@ -312,3 +312,135 @@ async def test_main_starts_metrics_server_runs_worker_and_cleans_up(
 
     port = get_settings().worker_metrics_port
     assert events == [f"server start {port}", "run", "server shutdown", "dispose"]
+
+
+# ---------------------------------------------------------------- опрос рейсов
+
+
+class PollScript:
+    """Подмена `poll_due_trips`: считает проходы и запоминает, что получила."""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.calls = 0
+        self.error = error
+        self.seen: list[tuple[object, object, asyncio.Event | None]] = []
+
+    async def __call__(
+        self,
+        session_factory: Any,
+        provider: Any,
+        *,
+        stop: asyncio.Event | None = None,
+    ) -> None:
+        self.calls += 1
+        self.seen.append((session_factory, provider, stop))
+        if self.error is not None:
+            raise self.error
+
+
+async def _wait_calls(script: PollScript, count: int) -> None:
+    for _ in range(300):
+        if script.calls >= count:
+            return
+        await asyncio.sleep(0.01)
+
+
+async def test_flight_polling_loop_polls_repeatedly_and_stops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = PollScript()
+    provider: Any = object()
+    monkeypatch.setattr(worker, "poll_due_trips", script)
+    stop = asyncio.Event()
+    task = asyncio.ensure_future(worker.run_flight_polling(stop, provider, interval=0.01))
+
+    await _wait_calls(script, 3)
+    stop.set()
+    await asyncio.wait_for(task, TIMEOUT)
+
+    assert script.calls >= 3
+    assert script.seen[0] == (SESSION_FACTORY, provider, stop)
+
+
+async def test_flight_polling_loop_survives_errors(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    script = PollScript(error=ConnectionRefusedError("db is down"))
+    monkeypatch.setattr(worker, "poll_due_trips", script)
+    caplog.set_level(logging.ERROR)
+    stop = asyncio.Event()
+    provider: Any = object()
+    task = asyncio.ensure_future(worker.run_flight_polling(stop, provider, interval=0.01))
+
+    await _wait_calls(script, 3)
+    assert not task.done()
+    stop.set()
+    await asyncio.wait_for(task, TIMEOUT)
+
+    assert script.calls >= 3
+    assert any(r.levelno == logging.ERROR for r in caplog.records)
+
+
+async def test_flight_polling_loop_exits_at_once_when_stopped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = PollScript()
+    monkeypatch.setattr(worker, "poll_due_trips", script)
+    stop = asyncio.Event()
+    stop.set()
+    provider: Any = object()
+
+    await asyncio.wait_for(worker.run_flight_polling(stop, provider), TIMEOUT)
+
+    assert script.calls == 0
+
+
+async def _run_main(monkeypatch: pytest.MonkeyPatch, provider: object | None) -> list[str]:
+    events: list[str] = []
+
+    class FakeServer:
+        def shutdown(self) -> None:
+            pass
+
+    async def fake_run(stop: asyncio.Event) -> None:
+        events.append("run")
+
+    async def fake_polling(stop: asyncio.Event, given: object) -> None:
+        events.append("polling")
+        assert given is provider
+
+    async def fake_dispose() -> None:
+        pass
+
+    monkeypatch.setattr(worker_main, "start_http_server", lambda port: (FakeServer(), object()))
+    monkeypatch.setattr(worker_main, "run", fake_run)
+    monkeypatch.setattr(worker_main, "run_flight_polling", fake_polling)
+    monkeypatch.setattr(worker_main, "build_provider", lambda settings: provider)
+    monkeypatch.setattr(worker_main, "dispose_engine", fake_dispose)
+    monkeypatch.setattr(worker_main, "configure_logging", lambda level: None)
+    monkeypatch.setattr(worker_main, "_stop_on_signals", lambda loop, stop: None)
+
+    await worker_main.main()
+    return events
+
+
+async def test_main_starts_flight_polling_when_provider_is_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = await _run_main(monkeypatch, object())
+
+    assert sorted(events) == ["polling", "run"]
+
+
+async def test_main_skips_flight_polling_without_provider(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+
+    events = await _run_main(monkeypatch, None)
+
+    assert events == ["run"]
+    assert any(
+        r.name == "app.worker" and r.levelno == logging.INFO and "опрос рейсов" in r.getMessage()
+        for r in caplog.records
+    )
