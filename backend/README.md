@@ -111,6 +111,11 @@ UPDATE background_jobs SET status = 'pending', attempts = 0, run_after = now() W
   после позднего из «конец дня `ends_on`» и последней отметки «Уехал». Удаление необратимо; пользователи
   остаются.
 
+В проде `FLIGHT_PROVIDER` и `RETENTION_ENABLED` пока не задаются: деплой (`.github/workflows/deploy.yml`)
+подставляет в `deploy/docker-compose.prod.yml` только явно перечисленные переменные, поэтому действуют
+умолчания `none` и `false`. Чтобы включить, добавьте переменную в секреты репозитория, в `env` шага «Собрать
+спецификацию контейнеров» и в список `envsubst` того же шага.
+
 ```sql
 SELECT status, count(*) FROM notifications GROUP BY status;
 SELECT id, kind, attempts, last_error FROM notifications WHERE status = 'failed' ORDER BY id DESC LIMIT 20;
