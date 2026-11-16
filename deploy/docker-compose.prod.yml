@@ -25,7 +25,7 @@ services:
       DEBUG: "${DEBUG}"
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
       WORKER_METRICS_PORT: "${WORKER_METRICS_PORT:-9100}"
-      FLIGHT_PROVIDER: "${FLIGHT_PROVIDER:-none}"
+      FLIGHT_PROVIDER: "${FLIGHT_PROVIDER}"
     depends_on:
       - db
     restart: always
@@ -62,8 +62,8 @@ services:
       DEBUG: "${DEBUG}"
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
       WORKER_METRICS_PORT: "${WORKER_METRICS_PORT:-9100}"
-      FLIGHT_PROVIDER: "${FLIGHT_PROVIDER:-none}"
-      RETENTION_ENABLED: "${RETENTION_ENABLED:-false}"
+      FLIGHT_PROVIDER: "${FLIGHT_PROVIDER}"
+      RETENTION_ENABLED: "${RETENTION_ENABLED}"
     depends_on:
       - db
     # воркер дозавершает текущую работу после SIGTERM

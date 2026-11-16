@@ -206,12 +206,15 @@ jobs:
           ACME_CA: ${{ secrets.ACME_CA || 'https://acme-v02.api.letsencrypt.org/directory' }}
           INIT_DATA_MAX_AGE_SECONDS: ${{ secrets.INIT_DATA_MAX_AGE_SECONDS || '86400' }}
           DEBUG: ${{ secrets.DEBUG || 'false' }}
+          FLIGHT_PROVIDER: ${{ secrets.FLIGHT_PROVIDER || 'none' }}
+          RETENTION_ENABLED: ${{ secrets.RETENTION_ENABLED || 'false' }}
         run: |
           # список переменных явный: $$(date +%u) в сервисе backup подставлять нельзя
           envsubst '${API_IMAGE} ${WEB_IMAGE} ${CADDY_IMAGE} ${BOT_TOKEN} ${BOT_USERNAME}
                     ${TELEGRAM_RELAY_URL} ${TELEGRAM_RELAY_SECRET}
                     ${POSTGRES_PASSWORD} ${SITE_ADDRESS} ${ACME_EMAIL} ${ACME_CA}
-                    ${INIT_DATA_MAX_AGE_SECONDS} ${DEBUG}' \
+                    ${INIT_DATA_MAX_AGE_SECONDS} ${DEBUG}
+                    ${FLIGHT_PROVIDER} ${RETENTION_ENABLED}' \
             < deploy/docker-compose.prod.yml > "$RUNNER_TEMP/spec.yml"
           docker compose -f "$RUNNER_TEMP/spec.yml" config --quiet
 

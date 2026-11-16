@@ -299,21 +299,63 @@ def test_pip_install_matcher_recognises_common_spellings(command: str) -> None:
     assert PIP_INSTALL.search(command)
 
 
-@pytest.mark.parametrize("path", [DEV_COMPOSE, PROD_COMPOSE], ids=["dev", "prod"])
-def test_flight_provider_and_retention_reach_the_right_containers(path: Path) -> None:
+@pytest.mark.parametrize(
+    ("path", "provider", "retention"),
+    [
+        (DEV_COMPOSE, "${FLIGHT_PROVIDER:-none}", "${RETENTION_ENABLED:-false}"),
+        # envsubst не понимает `:-`: в проде значение целиком подставляется шагом деплоя
+        (PROD_COMPOSE, "${FLIGHT_PROVIDER}", "${RETENTION_ENABLED}"),
+    ],
+    ids=["dev", "prod"],
+)
+def test_flight_provider_and_retention_reach_the_right_containers(
+    path: Path, provider: str, retention: str
+) -> None:
     compose: dict[str, Any] = yaml.safe_load(path.read_text(encoding="utf-8"))
     services = compose["services"]
 
     # без проводки значения из .env сервера не доходят до контейнера; дефолты как в Settings
     for name in ("api", "worker"):
-        assert str(services[name]["environment"]["FLIGHT_PROVIDER"]).strip('"') == (
-            "${FLIGHT_PROVIDER:-none}"
-        )
-    assert str(services["worker"]["environment"]["RETENTION_ENABLED"]).strip('"') == (
-        "${RETENTION_ENABLED:-false}"
-    )
+        assert str(services[name]["environment"]["FLIGHT_PROVIDER"]).strip('"') == provider
+    assert str(services["worker"]["environment"]["RETENTION_ENABLED"]).strip('"') == retention
     # очистку данных запускает только воркер
     assert "RETENTION_ENABLED" not in services["api"]["environment"]
+
+
+def test_deploy_passes_flight_provider_and_retention_to_prod_spec() -> None:
+    workflow: dict[str, Any] = yaml.safe_load(
+        (REPO_DIR / ".github" / "workflows" / "deploy.yml").read_text(encoding="utf-8")
+    )
+    steps = [
+        step
+        for job in workflow["jobs"].values()
+        for step in job.get("steps", [])
+        if step.get("name") == "Собрать спецификацию контейнеров"
+    ]
+    assert len(steps) == 1
+    step = steps[0]
+
+    # секрет не задан -> безопасное умолчание
+    assert step["env"]["FLIGHT_PROVIDER"] == "${{ secrets.FLIGHT_PROVIDER || 'none' }}"
+    assert step["env"]["RETENTION_ENABLED"] == "${{ secrets.RETENTION_ENABLED || 'false' }}"
+    envsubst_list = re.search(r"envsubst\s+'([^']*)'", step["run"])
+    assert envsubst_list
+    listed = set(re.findall(r"\$\{(\w+)\}", envsubst_list.group(1)))
+    assert {"FLIGHT_PROVIDER", "RETENTION_ENABLED"} <= listed
+
+    # envsubst понимает только `${NAME}`: любое другое выражение остаётся в спецификации как есть
+    compose: dict[str, Any] = yaml.safe_load(PROD_COMPOSE.read_text(encoding="utf-8"))
+    services = compose["services"]
+    plain = re.compile(r"\$\{(\w+)\}")
+    for service, name in (
+        ("api", "FLIGHT_PROVIDER"),
+        ("worker", "FLIGHT_PROVIDER"),
+        ("worker", "RETENTION_ENABLED"),
+    ):
+        value = str(services[service]["environment"][name]).strip('"')
+        match = plain.fullmatch(value)
+        assert match, f"{service}.{name}: {value}"
+        assert match.group(1) in listed
 
 
 @pytest.mark.parametrize("path", [DEV_COMPOSE, PROD_COMPOSE], ids=["dev", "prod"])

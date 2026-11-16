@@ -111,16 +111,19 @@ UPDATE background_jobs SET status = 'pending', attempts = 0, run_after = now() W
   ошибки остаётся в `sending` с паузой. Воркеру нужны `BOT_TOKEN`, `BOT_USERNAME` и, если ВМ не видит Telegram,
   `TELEGRAM_RELAY_URL` и `TELEGRAM_RELAY_SECRET` (`docs/telegram-relay.md`). Без настоящего `BOT_TOKEN` воркер
   работает, но уведомления не отправляет. Метрики — `ft_notifications_total{kind,outcome}` и
-  `ft_notifications_planned_total{outcome}` (`created`, `merged`, `deferred`).
+  `ft_notifications_planned_total{outcome}` (`created`, `merged`, `deferred`). Название группы в тексте
+  очищается от ссылок, доменов, `@`, `#`, команд, e-mail и телефонов и обрезается до 60 символов
+  (`notification_text.safe_title`): название задаёт админ, а сообщение приходит от официального бота.
 - **Удаление данных** раз в час, только при `RETENTION_ENABLED=true`. Группа удаляется целиком через 7 суток
   после самого позднего из моментов: конец дня `ends_on`, последняя отметка «Уехал», создание и последняя
   правка группы. Удаление необратимо; пользователи
   остаются.
 
-В проде `FLIGHT_PROVIDER` и `RETENTION_ENABLED` пока не задаются: деплой (`.github/workflows/deploy.yml`)
-подставляет в `deploy/docker-compose.prod.yml` только явно перечисленные переменные, поэтому действуют
-умолчания `none` и `false`. Чтобы включить, добавьте переменную в секреты репозитория, в `env` шага «Собрать
-спецификацию контейнеров» и в список `envsubst` того же шага.
+В проде `FLIGHT_PROVIDER` и `RETENTION_ENABLED` задаются секретами репозитория с теми же именами; без секретов
+действуют `none` и `false`. Деплой (`.github/workflows/deploy.yml`) подставляет их в
+`deploy/docker-compose.prod.yml` через `envsubst`, поэтому там стоят простые `${FLIGHT_PROVIDER}` и
+`${RETENTION_ENABLED}`: выражения вида `${VAR:-default}` `envsubst` не подставляет. Перед первым включением
+`RETENTION_ENABLED` сделайте дамп БД: удаление необратимо.
 
 ```sql
 SELECT status, count(*) FROM notifications GROUP BY status;
