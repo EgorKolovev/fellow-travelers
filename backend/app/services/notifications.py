@@ -148,6 +148,7 @@ class _Planner:
         self.actors = {e.actor_user_id for e in entries if e.actor_user_id is not None}
         self.drafts: _Drafts = defaultdict(list)
         self._members: dict[uuid.UUID, list[uuid.UUID]] = {}
+        self._departed: set[uuid.UUID] | None = None
 
     def run(self) -> None:
         trip_entries: dict[uuid.UUID, list[AuditLog]] = defaultdict(list)
@@ -177,6 +178,27 @@ class _Planner:
             if user_id is None or user_id in self.actors:
                 continue
             self.drafts[(entry.event_id, user_id)].append(_Candidate(kind, entry.id, dict(payload)))
+
+    def _departed_applications(self) -> set[uuid.UUID]:
+        """Заявки с отметкой «Уехал» среди записей `transfer_left` транзакции: один запрос."""
+        if self._departed is None:
+            ids = {
+                e.application_id
+                for e in self.entries
+                if e.action == AuditAction.TRANSFER_LEFT and e.application_id is not None
+            }
+            self._departed = (
+                set(
+                    self.session.scalars(
+                        select(Application.id).where(
+                            Application.id.in_(ids), Application.departed_at.is_not(None)
+                        )
+                    )
+                )
+                if ids
+                else set()
+            )
+        return self._departed
 
     def _members_of(self, transfer_id: uuid.UUID) -> list[uuid.UUID]:
         """Пользователи заявок, которые сейчас стоят в трансфере и ещё не уехали."""
@@ -226,8 +248,12 @@ class _Planner:
         if entry.transfer_id is None:
             return
         payload = self._transfer_payload(entry)
-        # вышедшему из-за отмены рейса уже пришло `flight_cancelled`: второго сообщения нет
-        if entry.reason != AuditReason.FLIGHT_CANCELLED:
+        # вышедшему из-за отмены рейса уже пришло `flight_cancelled`: второго сообщения нет;
+        # уехавшим сообщения о составе не отправляются (контракт §12)
+        if (
+            entry.reason != AuditReason.FLIGHT_CANCELLED
+            and entry.application_id not in self._departed_applications()
+        ):
             self._add(entry, [entry.subject_user_id], NotificationKind.TRANSFER_LEFT, payload)
         # расформированный трансфер пуст: оставшимся придёт их собственный `transfer_left`
         self._add(entry, self._others(entry), NotificationKind.TRANSFER_CHANGED, payload)

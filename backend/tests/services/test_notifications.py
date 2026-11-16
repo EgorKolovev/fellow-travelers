@@ -303,3 +303,21 @@ async def test_departed_member_is_not_notified_about_transfer_changes(
     users = {row.user_id for row in await stored(db_session, event.id)}
     assert departed.user_id not in users
     assert users == {members[0].user_id, members[1].user_id}
+
+
+async def test_departed_subject_of_dissolved_transfer_gets_no_transfer_left(
+    db_session: AsyncSession,
+) -> None:
+    event, transfer, members = await pair(db_session)
+    leaver, departed = members
+    departed.departed_at = datetime.now(UTC)
+    await db_session.flush()
+    await _leave(db_session, event, transfer, leaver, AuditReason.MEMBER_LEFT)
+    # трансфер расформирован: уехавший остаётся один и получает `solo` с записью member_left
+    await _leave(db_session, event, transfer, departed, AuditReason.MEMBER_LEFT)
+
+    await db_session.commit()
+
+    users = {row.user_id for row in await stored(db_session, event.id)}
+    assert departed.user_id not in users
+    assert leaver.user_id in users

@@ -1,9 +1,11 @@
 """Удаление данных группы через 7 суток после её окончания (Д11, CAP-02).
 
-Срок: `now >= max(конец дня ends_on, последняя отметка «Уехал») + 7 суток`. У группы нет своего
+Срок: `now >= max(конец дня ends_on, последняя отметка «Уехал», created_at и updated_at группы)
++ 7 суток`. Создание и любая правка группы дают свои 7 суток, поэтому `ends_on`, поставленный
+задним числом (опечатка или решение админа), не удаляет группу в ближайший час. У группы нет своего
 часового пояса, поэтому «конец дня ends_on» берётся по самому позднему поясу на Земле (UTC−12):
 `(ends_on + 1 день) 00:00 UTC + 12 ч`. Так группа не удаляется раньше срока ни в одном поясе.
-Нет отметок «Уехал» — срок считается только от `ends_on`.
+Нет отметок «Уехал» — срок считается от `ends_on`, `created_at` и `updated_at`.
 
 Удаляется строка `events`; участие, заявки, трансферы, рейсы, история, задания, уведомления и
 приглашение уходят каскадом БД. Триггер `audit_log` пропускает каскад (`pg_trigger_depth() >= 2`).
@@ -23,11 +25,14 @@ logger = logging.getLogger(__name__)
 RETENTION_PERIOD = timedelta(days=7)
 
 # Момент, когда группу пора удалять; `e` — строка events. GREATEST пропускает NULL, поэтому
-# без отметок «Уехал» остаётся только конец дня ends_on по UTC−12.
+# без отметок «Уехал» остаются конец дня ends_on по UTC−12 и created_at/updated_at группы
+# (`events.updated_at` обновляется при любой правке строки: `onupdate=now()`).
 _DEADLINE = """
     GREATEST(
         ((e.ends_on + 1)::timestamp AT TIME ZONE 'UTC') + interval '12 hours',
-        (SELECT max(a.departed_at) FROM applications a WHERE a.event_id = e.id)
+        (SELECT max(a.departed_at) FROM applications a WHERE a.event_id = e.id),
+        e.created_at,
+        e.updated_at
     ) + CAST(:period AS interval)
 """
 

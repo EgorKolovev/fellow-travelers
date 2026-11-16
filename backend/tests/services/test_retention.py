@@ -3,6 +3,7 @@
 import logging
 import uuid
 from datetime import UTC, date, datetime, timedelta, timezone
+from typing import Any
 
 import pytest
 from sqlalchemy import func, select, text, update
@@ -21,12 +22,14 @@ from app.services.retention import expired_event_ids, purge_event, purge_expired
 from tests.factories import (
     make_application,
     make_audit_log,
-    make_event,
     make_job,
     make_membership,
     make_transfer,
     make_trip,
     make_user,
+)
+from tests.factories import (
+    make_event as factory_make_event,
 )
 
 ENDS_ON = date(2026, 11, 14)
@@ -34,6 +37,32 @@ ENDS_ON = date(2026, 11, 14)
 ENDS_DEADLINE = datetime(2026, 11, 22, 12, 0, tzinfo=UTC)
 SECOND = timedelta(seconds=1)
 UTC_PLUS_7 = timezone(timedelta(hours=7))
+
+
+LONG_AGO = datetime(2020, 1, 1, tzinfo=UTC)
+
+
+async def stamp_event(
+    session: AsyncSession,
+    event: Event,
+    *,
+    created_at: datetime = LONG_AGO,
+    updated_at: datetime = LONG_AGO,
+) -> None:
+    """Ставит created_at/updated_at группы SQL-ом (в одном UPDATE: onupdate не перезапишет)."""
+    await session.execute(
+        update(Event)
+        .where(Event.id == event.id)
+        .values(created_at=created_at, updated_at=updated_at)
+    )
+    await session.refresh(event)
+
+
+async def make_event(session: AsyncSession, **kw: Any) -> Event:
+    """Группа «давно созданная и давно правленная»: срок зависит только от ends_on и «Уехал»."""
+    event = await factory_make_event(session, **kw)
+    await stamp_event(session, event)
+    return event
 
 
 def factory_of(session: AsyncSession) -> async_sessionmaker[AsyncSession]:
@@ -136,6 +165,46 @@ async def test_expired_ids_are_ordered_by_deadline_and_limited(db_session: Async
     assert await expired_event_ids(db_session, now, limit=2) == [oldest.id, middle.id]
 
 
+async def test_backdated_ends_on_of_fresh_group_keeps_seven_days_from_creation(
+    db_session: AsyncSession,
+) -> None:
+    created = datetime(2026, 11, 17, 9, 0, tzinfo=UTC)
+    event = await factory_make_event(
+        db_session, starts_on=date(2026, 10, 1), ends_on=date(2026, 10, 18)
+    )
+    await stamp_event(db_session, event, created_at=created, updated_at=created)
+    deadline = created + retention.RETENTION_PERIOD
+
+    assert event.id not in await expired_event_ids(db_session, created + timedelta(hours=1))
+    assert event.id not in await expired_event_ids(db_session, deadline - SECOND)
+    assert event.id in await expired_event_ids(db_session, deadline)
+
+
+async def test_backdated_ends_on_set_by_edit_keeps_seven_days_from_update(
+    db_session: AsyncSession,
+) -> None:
+    updated = datetime(2026, 11, 17, 9, 0, tzinfo=UTC)
+    event = await make_event(db_session, starts_on=date(2026, 10, 1), ends_on=date(2026, 10, 18))
+    await stamp_event(db_session, event, updated_at=updated)
+    deadline = updated + retention.RETENTION_PERIOD
+
+    assert event.id not in await expired_event_ids(db_session, deadline - SECOND)
+    assert event.id in await expired_event_ids(db_session, deadline)
+
+
+async def test_ordinary_edit_of_group_bumps_updated_at_and_moves_the_deadline(
+    db_session: AsyncSession,
+) -> None:
+    event = await make_event(db_session, starts_on=date(2026, 10, 1), ends_on=date(2026, 10, 2))
+    now = datetime.now(UTC)
+    assert event.id in await expired_event_ids(db_session, now)
+
+    await db_session.execute(update(Event).where(Event.id == event.id).values(title="Новое"))
+
+    assert event.id not in await expired_event_ids(db_session, now + timedelta(days=6))
+    assert event.id in await expired_event_ids(db_session, now + timedelta(days=8))
+
+
 # ---------------------------------------------------------------- каскад
 
 
@@ -226,6 +295,22 @@ async def test_purge_event_keeps_group_that_was_extended_after_selection(
     )
     assert await purge_event(db_session, event.id, now=now) is False
     assert await exists(db_session, event.id)
+
+
+async def test_purge_event_keeps_group_whose_ends_on_was_moved_to_the_past(
+    db_session: AsyncSession,
+) -> None:
+    moment = datetime(2026, 11, 17, 9, 0, tzinfo=UTC)
+    event = await make_event(db_session, starts_on=date(2026, 10, 1), ends_on=date(2026, 12, 1))
+    await db_session.execute(
+        update(Event)
+        .where(Event.id == event.id)
+        .values(ends_on=date(2026, 10, 18), updated_at=moment)
+    )
+
+    assert await purge_event(db_session, event.id, now=moment + timedelta(hours=1)) is False
+    assert await exists(db_session, event.id)
+    assert await purge_event(db_session, event.id, now=moment + timedelta(days=7)) is True
 
 
 async def test_purge_event_keeps_group_with_new_departure_mark(db_session: AsyncSession) -> None:

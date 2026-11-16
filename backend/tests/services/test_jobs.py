@@ -551,3 +551,34 @@ async def test_pause_after_double_failure_expires_with_retry_delay(
         assert await process_next(factory) is None  # commit снова сломан, но задание взято
 
     assert (await _fresh_job(db_session, job_id)).attempts == 0  # регистрация всё ещё не удалась
+
+
+async def test_commit_failure_after_reconcile_is_registered_as_job_failure(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Сбой commit (в нём работает планировщик уведомлений) идёт путём сбоя пересчёта."""
+    job = await make_job(db_session)
+    job_id = job.id
+    factory = shared_session_factory(db_session)
+    real_commit = AsyncSession.commit
+    calls = 0
+
+    async def commit_fails_once(self: AsyncSession) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise LostCommitError()
+        await real_commit(self)
+
+    monkeypatch.setattr(AsyncSession, "commit", commit_fails_once)
+
+    outcome = await process_next(factory)
+
+    assert outcome == JobOutcome.RETRY
+    stored = await _fresh_job(db_session, job_id)
+    assert (stored.status, stored.attempts, stored.last_error) == (
+        JobStatus.PENDING,
+        1,
+        "LostCommitError",
+    )
+    assert timedelta(seconds=5) <= await _delay_until_run(db_session, job_id)

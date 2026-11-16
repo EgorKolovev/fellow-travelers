@@ -183,8 +183,9 @@ async def process_next(session_factory: async_sessionmaker[AsyncSession]) -> Job
     опросами). Задание блокируется `FOR UPDATE SKIP LOCKED`, поэтому несколько воркеров делят
     очередь, не ожидая друг друга. Пересчёт идёт внутри savepoint, под `lock_event` группы.
     Успех удаляет задание в той же транзакции: повторная доставка ничего не меняет. Ошибка
-    откатывает только пересчёт: `attempts` растёт, `run_after` сдвигается на `retry_delay`,
-    в `last_error` пишется имя класса исключения (текст может содержать персональные данные).
+    пересчёта или самого commit (в нём работает планировщик уведомлений) откатывает транзакцию:
+    `attempts` растёт, `run_after` сдвигается на `retry_delay`, в `last_error` пишется имя класса
+    исключения (текст может содержать персональные данные).
     После `MAX_ATTEMPTS` попыток задание получает `failed` и больше не берётся.
 
     Учитывает ошибку `_register_failure` на отдельной короткой транзакции: сессия с пересчётом
@@ -221,11 +222,13 @@ async def process_next(session_factory: async_sessionmaker[AsyncSession]) -> Job
                             frozenset() if job.trip_id is None else frozenset({job.trip_id})
                         ),
                     )
+                await session.execute(delete(BackgroundJob).where(BackgroundJob.id == job_id))
+                # commit запускает планировщик уведомлений (`before_commit`): его сбой, как и сбой
+                # самого commit, считается ошибкой задания и идёт в `_register_failure`
+                await session.commit()
             except Exception as exc:
                 exc_to_register = exc
             else:
-                await session.execute(delete(BackgroundJob).where(BackgroundJob.id == job_id))
-                await session.commit()
                 _observe_attempt(kind, JobOutcome.DONE, started)
                 logger.info(
                     "Пересчёт трансферов выполнен: исключено заявок %d, расформировано трансферов"
