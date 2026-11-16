@@ -8,7 +8,7 @@ import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -205,7 +205,20 @@ async def test_notify_ignores_repeated_key(db_session: AsyncSession) -> None:
     )
     await db_session.commit()
 
-    assert [row.dedupe_key for row in await stored(db_session, event.id)] == [key, f"{key}-later"]
+    # неотправленное событие того же человека склеивается: одна строка с первым ключом
+    assert [row.dedupe_key for row in await stored(db_session, event.id)] == [key]
+
+    await db_session.execute(update(Notification).values(status=NotificationStatus.SENT))
+    for _ in range(2):  # отправленная строка не мешает: тот же ключ повторно не пишется
+        await notify(
+            db_session,
+            user_id=person.id,
+            event_id=event.id,
+            kind=NotificationKind.POINTS_CHANGED,
+            payload={"event_id": str(event.id)},
+            dedupe_key=key,
+        )
+    assert [row.status for row in await stored(db_session, event.id)] == [NotificationStatus.SENT]
 
 
 async def test_planner_ignores_rolled_back_savepoint(db_session: AsyncSession) -> None:

@@ -32,6 +32,7 @@ from app.models import (
     Trip,
     User,
 )
+from app.observability.metrics import NotificationOutcome
 from app.services import notification_sender
 from app.services.notification_sender import LEASE, SendResult, TelegramSender, send_due
 from tests.factories import make_event, make_trip, make_user
@@ -243,7 +244,7 @@ async def test_chat_not_found_is_skipped_but_other_bad_request_is_retried(
     assert result == SendResult(skipped=1, retried=1)
     assert (await _load(sessions, not_found)).status == NotificationStatus.SKIPPED
     retried = await _load(sessions, other)
-    assert (retried.status, retried.attempts) == (NotificationStatus.PENDING, 1)
+    assert (retried.status, retried.attempts) == (NotificationStatus.SENDING, 1)
 
 
 async def test_retry_after_postpones_without_attempt(
@@ -256,7 +257,7 @@ async def test_retry_after_postpones_without_attempt(
 
     assert result == SendResult(retried=1, pause_seconds=17.0)
     row = await _load(sessions, nid)
-    assert row.status == NotificationStatus.PENDING
+    assert row.status == NotificationStatus.SENDING  # повтор остаётся в отправке с паузой
     assert row.attempts == 2
     assert row.run_after == NOW + timedelta(seconds=17)
     assert row.last_error == "TelegramRetryAfter"
@@ -284,7 +285,7 @@ async def test_network_errors_back_off_exponentially(
 
     assert result == SendResult(retried=1)
     row = await _load(sessions, nid)
-    assert (row.status, row.attempts, row.last_error) == (NotificationStatus.PENDING, 1, name)
+    assert (row.status, row.attempts, row.last_error) == (NotificationStatus.SENDING, 1, name)
     assert row.run_after == NOW + timedelta(seconds=60)  # 30 с · 2^1
 
 
@@ -429,7 +430,7 @@ async def test_stop_prevents_new_sends(
     assert result == SendResult(sent=1)  # текущая отправка дошла до конца
     assert len(sender.calls) == 1
     assert (await _load(sessions, ids[0])).status == NotificationStatus.SENT
-    assert (await _load(sessions, ids[1])).status == NotificationStatus.PENDING
+    assert (await _load(sessions, ids[1])).status == NotificationStatus.SENDING  # аренда
 
 
 async def test_already_stopped_takes_nothing(
@@ -495,7 +496,7 @@ async def test_retry_after_stops_the_pass_and_asks_for_a_pause(
     postponed = await _load(sessions, ids[1])
     assert postponed.run_after == NOW + timedelta(seconds=30)
     untouched = await _load(sessions, ids[2])
-    assert untouched.status == NotificationStatus.PENDING
+    assert untouched.status == NotificationStatus.SENDING
     assert untouched.run_after == NOW + LEASE  # вернётся по окончании аренды
     # после окончания аренды строка уходит обычным порядком
     again = await send_due(sessions, FakeSender(), now=NOW + LEASE)
@@ -524,7 +525,7 @@ async def test_store_result_failure_does_not_stop_the_pass(
 
     assert result == SendResult(sent=2)
     assert len(sender.calls) == 3
-    assert (await _load(sessions, ids[0])).status == NotificationStatus.PENDING
+    assert (await _load(sessions, ids[0])).status == NotificationStatus.SENDING
     assert (await _load(sessions, ids[2])).status == NotificationStatus.SENT
     (record,) = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert "ConnectionRefusedError" in record.getMessage()
@@ -558,3 +559,64 @@ async def test_locked_row_is_skipped_not_waited(
 
     again = await asyncio.wait_for(send_due(sessions, sender, now=NOW), 3)
     assert again.sent == 1  # после отпускания блокировки строка A уходит
+
+
+async def test_retry_stays_in_sending_and_is_taken_again_when_the_pause_ends(
+    sessions: async_sessionmaker[AsyncSession], group: Group
+) -> None:
+    nid = await _add(sessions, group)
+    first = await send_due(
+        sessions, FakeSender(errors=[TelegramNetworkError(METHOD, "x")]), now=NOW
+    )
+    assert first == SendResult(retried=1)
+    row = await _load(sessions, nid)
+    assert (row.status, row.run_after) == (NotificationStatus.SENDING, NOW + timedelta(seconds=60))
+
+    sender = FakeSender()
+    assert await send_due(sessions, sender, now=NOW + timedelta(seconds=59)) == SendResult()
+    assert await send_due(sessions, sender, now=NOW + timedelta(seconds=60)) == SendResult(sent=1)
+    assert (await _load(sessions, nid)).status == NotificationStatus.SENT
+
+
+async def test_expired_lease_of_a_sending_row_is_taken_again(
+    sessions: async_sessionmaker[AsyncSession], group: Group
+) -> None:
+    nid = await _add(sessions, group, status=NotificationStatus.SENDING, run_after=NOW)
+
+    sender = FakeSender()
+    assert await send_due(sessions, sender, now=NOW - timedelta(seconds=1)) == SendResult()
+    assert await send_due(sessions, sender, now=NOW) == SendResult(sent=1)
+    assert (await _load(sessions, nid)).status == NotificationStatus.SENT
+
+
+async def test_leasing_marks_rows_sending_and_result_goes_only_to_sending_rows(
+    sessions: async_sessionmaker[AsyncSession], group: Group
+) -> None:
+    nid = await _add(sessions, group)
+    (item,) = await notification_sender._lease_due(sessions, NOW, 20)
+    row = await _load(sessions, nid)
+    assert (row.status, row.run_after) == (NotificationStatus.SENDING, NOW + LEASE)
+
+    await notification_sender._store_result(sessions, item, NotificationOutcome.SENT)
+    assert (await _load(sessions, nid)).status == NotificationStatus.SENT
+
+    # результат второго воркера по уже закрытой строке ничего не меняет
+    await notification_sender._store_result(
+        sessions, item, NotificationOutcome.FAILED, error="X", attempts=8
+    )
+    assert (await _load(sessions, nid)).status == NotificationStatus.SENT
+
+
+async def test_several_changes_text_and_button(
+    sessions: async_sessionmaker[AsyncSession], group: Group
+) -> None:
+    await _add(sessions, group, kind=NotificationKind.SEVERAL_CHANGES)
+    sender = FakeSender()
+
+    await send_due(sessions, sender, now=NOW)
+
+    (call,) = sender.calls
+    assert (
+        call.text == f"В поездке «{TITLE}» несколько изменений. Откройте поездку, чтобы посмотреть."
+    )
+    assert call.button_url == f"https://t.me/test_bot?startapp=event_{group.event_id}"

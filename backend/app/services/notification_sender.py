@@ -2,11 +2,14 @@
 
 Проход `send_due`:
 
-1. Первая транзакция берёт до `batch` строк `pending` с `run_after <= now` (порядок
-   `(run_after, id)`, `FOR UPDATE SKIP LOCKED`) и отодвигает им `run_after` на `LEASE`.
-   Параллельные воркеры делят строки, упавший воркер возвращает их по истечении аренды.
+1. Первая транзакция берёт до `batch` строк `pending` и `sending` с `run_after <= now` (порядок
+   `(run_after, id)`, `FOR UPDATE SKIP LOCKED`), ставит им `status = 'sending'` и `run_after`
+   на `LEASE` вперёд. Параллельные воркеры делят строки, упавший воркер возвращает их по
+   истечении аренды (`sending` с прошедшим `run_after` берётся снова). Строка в `sending` не
+   склеивается с новыми событиями: для них появляется новая `pending`.
 2. Для каждой строки вне транзакции собирается текст и идёт запрос в Telegram.
-3. Отдельная короткая транзакция пишет результат. Метрика растёт после commit.
+3. Отдельная короткая транзакция пишет результат строке в `sending`. Повтор после ошибки
+   оставляет её в `sending` с новым `run_after` (паузой). Метрика растёт после commit.
 
 Доставка «как минимум один раз»: если процесс упал или запись статуса не удалась между отправкой
 и записью результата, строка вернётся в очередь по окончании аренды, и сообщение уйдёт повторно.
@@ -133,7 +136,9 @@ async def _lease_due(
                     Notification.attempts,
                 )
                 .where(
-                    Notification.status == NotificationStatus.PENDING,
+                    Notification.status.in_(
+                        (NotificationStatus.PENDING, NotificationStatus.SENDING)
+                    ),
                     Notification.run_after <= now,
                 )
                 .order_by(Notification.run_after, Notification.id)
@@ -146,7 +151,7 @@ async def _lease_due(
         await session.execute(
             update(Notification)
             .where(Notification.id.in_([row.id for row in rows]))
-            .values(run_after=now + LEASE)
+            .values(status=NotificationStatus.SENDING, run_after=now + LEASE)
             .execution_options(synchronize_session=False)
         )
         await session.commit()
@@ -233,7 +238,7 @@ async def _store_result(
     async with session_factory() as session:
         result = await session.execute(
             update(Notification)
-            .where(Notification.id == item.id, Notification.status == NotificationStatus.PENDING)
+            .where(Notification.id == item.id, Notification.status == NotificationStatus.SENDING)
             .values(**values)
             .execution_options(synchronize_session=False)
         )

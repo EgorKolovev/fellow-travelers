@@ -68,6 +68,7 @@ from tests.e2e.test_pre_mvp import (
 )
 from tests.helpers.audit_replay import audit_rows
 from tests.helpers.jobs import shared_session_factory
+from tests.helpers.notifications import deliver_pending
 
 AVATAR = "https://t.me/i/userpic/320/alice.jpg"
 # рейс поставщика: LED -> SVO, вылет 07:00 и прилёт 10:00 по Москве
@@ -915,6 +916,9 @@ async def test_step8_cancellation_messages_across_poll_and_reconcile(
         await apply(c, s, event_id, carol, manual, wait=15)
     (transfer,) = await admin_transfers(c, event_id)
     assert len(transfer["members"]) == (3 if with_carol else 2)
+    await deliver_pending(
+        s, uuid.UUID(event_id)
+    )  # накопленное «ушло»: новые события — новые строки
     mark_id = await last_id(s, event_id)
 
     provider.add(flight(status=TripStatus.CANCELLED))
@@ -1007,6 +1011,7 @@ async def test_step8_notifications_recipients_content_and_delivery(
     assert await kinds(s, event_id) == {alice.telegram_id: "transfer_assigned"}
 
     # сдвиг прибытия на 20 минут: пассажиру рейса и его попутчику по трансферу
+    await deliver_pending(s, uuid.UUID(event_id))  # сообщение о подборе ушло: дальше новые строки
     mark_id = await last_id(s, event_id)
     provider.add(flight(estimated_arrival=ARR + timedelta(minutes=20)))
     now = datetime(2026, 11, 11, 12, 0, tzinfo=UTC)
@@ -1025,6 +1030,7 @@ async def test_step8_notifications_recipients_content_and_delivery(
     # правка точек: участникам с активной заявкой; отменившая и без заявки сообщений не получают
     await apply(c, s, event_id, vera, manual, wait=0)
     await act(c, s, event_id, vera, "cancel")
+    await deliver_pending(s, uuid.UUID(event_id))
     mark_id = await last_id(s, event_id)
     await call(
         c,
@@ -1042,7 +1048,7 @@ async def test_step8_notifications_recipients_content_and_delivery(
 
     # отправка: бот Бориса заблокирован, Алисе всё уходит; текст без телефонов и имён,
     # кнопка ведёт в «Мою поездку»
-    all_rows = await rows(s, event_id)
+    all_rows = await rows(s, event_id, after=mark_id)  # строки до `mark_id` уже «ушли»
     outbox = Outbox(
         errors={
             boris.telegram_id: TelegramForbiddenError(
@@ -1064,7 +1070,7 @@ async def test_step8_notifications_recipients_content_and_delivery(
         assert button_url == f"https://t.me/test_bot?startapp=event_{event_id}"
         assert "Уведомления" in text
         assert not any(secret in text for secret in secrets)
-    statuses = {(tg, row.status) for tg, row in await rows(s, event_id)}
+    statuses = {(tg, row.status) for tg, row in await rows(s, event_id, after=mark_id)}
     assert statuses == {
         (alice.telegram_id, NotificationStatus.SENT),
         (boris.telegram_id, NotificationStatus.SKIPPED),

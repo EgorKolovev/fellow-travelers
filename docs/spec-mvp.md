@@ -245,10 +245,10 @@ sequenceDiagram
 
 | Элемент | Вход | Выход | Побочные эффекты и ошибки |
 | --- | --- | --- | --- |
-| `services/notifications.plan_notifications` | синхронная `Session` перед commit; записи истории транзакции из `session.info["fellow_audit_pending"]` | `None` | Обработчик `before_commit` (`app/db.py`), пропускает savepoint. Адресаты по текущему состоянию внутри транзакции; `INSERT ... ON CONFLICT (user_id, dedupe_key) DO NOTHING` |
+| `services/notifications.plan_notifications` | синхронная `Session` перед commit; записи истории транзакции из `session.info["fellow_audit_pending"]` | `None` | Обработчик `before_commit` (`app/db.py`), пропускает savepoint. Адресаты по текущему состоянию внутри транзакции; запись через `services/notification_store` (склейка и лимит, M-04a) |
 | `services/notifications.notify` | `session`, `user_id`, `event_id`, `kind`, `payload`, `dedupe_key` | `None` | Прямая запись, только для `points_changed`: у правки группы нет записи истории |
-| `kind` | — | `transfer_assigned`, `transfer_changed`, `transfer_left`, `points_changed`, `flight_changed`, `flight_cancelled` | Адресаты по Д9, порог по Д10 |
-| Отправитель в воркере | Строки `notifications` | Статус `sent`, `skipped` или `failed` | После 8 неудач — `failed`, ERROR-лог. `TelegramRetryAfter` — пауза из ответа. В логе нет телефона, текста сообщения и токена |
+| `kind` | — | `transfer_assigned`, `transfer_changed`, `transfer_left`, `points_changed`, `flight_changed`, `flight_cancelled`, `several_changes` (склейка, M-04a) | Адресаты по Д9, порог по Д10 |
+| Отправитель в воркере | Строки `notifications` | Аренда `sending`, затем `sent`, `skipped` или `failed` | После 8 неудач — `failed`, ERROR-лог. `TelegramRetryAfter` — пауза из ответа. В логе нет телефона, текста сообщения и токена |
 
 Одна транзакция даёт одному пользователю одно сообщение: при нескольких видах берётся самый важный
 (`transfer_assigned` > `transfer_left` > `flight_cancelled` > `transfer_changed` > `flight_changed`);
@@ -283,7 +283,7 @@ stateDiagram-v2
 | Не больше одной неотправленной строки на человека в группе | Частичный уникальный индекс `(user_id, event_id) WHERE status = 'pending'`. Строка в отправке (`sending`) не мешает новой `pending` |
 | Склейка | Новое событие для того же `(user_id, event_id)` при существующей `pending`: тот же вид — обновляется `payload`; другой вид — вид `several_changes` («В поездке «…» несколько изменений. Откройте поездку.»), `payload` только `event_id`. `run_after`, `dedupe_key` и `attempts` строки не меняются |
 | Задержка | Новая строка получает `run_after = now() + 30 с`, чтобы частые изменения успели склеиться |
-| Часовой лимит | Если за последние 60 минут человеку по этой группе уже ушло (`sent`) или уходит (`sending`) 6 сообщений, новая строка получает `run_after` = момент, когда самое раннее из них выйдет из окна часа. Сообщение не теряется, склейка в него продолжается |
+| Часовой лимит | Считаются строки человека в группе со `status = 'sent'` (момент — `sent_at`) и `'sending'` (момент — сейчас) за последние 60 минут. Если их 6 и больше, новая строка получает `run_after` = момент шестой с конца + 1 ч (так в окне остаётся не больше 5 и новая становится шестой), но не раньше `now() + 30 с`. Сообщение не теряется, склейка в него продолжается |
 | Гонка двух транзакций | `UPDATE` существующей `pending`; если строки нет — `INSERT ... ON CONFLICT DO NOTHING`; если вставка не прошла (другая транзакция вставила раньше) — `UPDATE` ещё раз |
 | Аренда и повтор | Воркер берёт `pending` с `run_after <= now` и `sending` с `run_after <= now` (истёкшая аренда или пауза повтора), ставит `status = 'sending'` и аренду. Повтор после ошибки остаётся в `sending` с новой паузой: строка уже вне склейки, поэтому с новой `pending` того же человека не конфликтует. Результат пишется только строке в `sending` |
 

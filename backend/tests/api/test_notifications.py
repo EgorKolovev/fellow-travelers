@@ -44,6 +44,7 @@ from tests.factories import (
     make_user,
 )
 from tests.helpers.jobs import shared_session_factory
+from tests.helpers.notifications import deliver_pending
 
 ADMIN_TELEGRAM_ID = 500
 K = NotificationKind
@@ -152,6 +153,7 @@ async def test_third_member_joining_tells_the_pair_but_not_the_newcomer(
 ) -> None:
     await apply(api_client, db_session, event, 101)
     await apply(api_client, db_session, event, 102)
+    await deliver_pending(db_session, event.id)  # прежние сообщения «ушли»: события — новые строки
     before = await last_id(db_session, event)
 
     await apply(api_client, db_session, event, USER_TELEGRAM_ID)
@@ -167,6 +169,7 @@ async def test_leaving_a_triple_tells_leaver_nothing_and_the_rest_changed(
 ) -> None:
     for telegram_id in (101, 102, USER_TELEGRAM_ID):
         await apply(api_client, db_session, event, telegram_id)
+    await deliver_pending(db_session, event.id)  # прежние сообщения «ушли»: события — новые строки
     before = await last_id(db_session, event)
 
     response = await act(api_client, db_session, event, "go-solo", 102)
@@ -342,6 +345,7 @@ async def test_admin_edit_by_twenty_minutes_tells_passenger_and_mate_and_sets_ba
     assert fresh.notified_arrival == datetime(2026, 11, 12, 5, 25, tzinfo=UTC)
 
     # ещё на 10 минут от уже сообщённого значения — тишина; ещё на 10 (итого 20) — сообщение
+    await deliver_pending(db_session, group.id)
     before = await last_id(db_session, group)
     await patch_trip(
         api_client, trip.id, {"estimated_arrival": "2026-11-12T08:35:00"}, ADMIN_TELEGRAM_ID
@@ -479,7 +483,13 @@ async def test_points_change_tells_participants_except_author_and_cancelled(
     # тест идёт в одной транзакции, `now()` в ней не меняется: ключ правки подменяем счётчиком
     ticks = itertools.count()
     monkeypatch.setattr("app.services.events.iso", lambda moment: f"edit-{next(ticks)}")
+    # пока первое сообщение не ушло, новая правка склеивается в него: строк по-прежнему две
     await patch({"destination": {"address": "Другой отель", "lat": 55.0, "lon": 37.0}})
+    assert len(await rows_of(db_session, group)) == 2
+    assert {r.kind for r in await rows_of(db_session, group)} == {K.POINTS_CHANGED}
+    # после отправки следующая правка даёт новые строки
+    await deliver_pending(db_session, group.id)
+    await patch({"destination": {"address": "Третий отель", "lat": 55.1, "lon": 37.1}})
     assert len(await rows_of(db_session, group)) == 4
     assert len(await _all_transfers(db_session, group)) == 0  # трансферы не пересчитываются
 

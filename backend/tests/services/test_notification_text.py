@@ -53,6 +53,10 @@ def test_format_arrival_uses_local_time_of_the_airport() -> None:
             NotificationKind.FLIGHT_CANCELLED,
             "Рейс SU1234 отменён — «Конференция». Выберите другой рейс в заявке.",
         ),
+        (
+            NotificationKind.SEVERAL_CHANGES,
+            "В поездке «Конференция» несколько изменений. Откройте поездку, чтобы посмотреть.",
+        ),
     ],
 )
 def test_every_kind_has_its_text(kind: NotificationKind, expected: str) -> None:

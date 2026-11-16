@@ -92,10 +92,13 @@ class NotificationKind(StrEnum):
     POINTS_CHANGED = "points_changed"
     FLIGHT_CHANGED = "flight_changed"
     FLIGHT_CANCELLED = "flight_cancelled"
+    # итог склейки разных видов в одной ещё не отправленной строке (M-04a)
+    SEVERAL_CHANGES = "several_changes"
 
 
 class NotificationStatus(StrEnum):
     PENDING = "pending"
+    SENDING = "sending"
     SENT = "sent"
     SKIPPED = "skipped"
     FAILED = "failed"

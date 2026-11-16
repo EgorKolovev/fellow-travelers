@@ -102,12 +102,16 @@ UPDATE background_jobs SET status = 'pending', attempts = 0, run_after = now() W
   активными заявками; расписание — Д2 в `docs/spec-mvp.md`. Изменения пишутся в историю от `system` и ставят
   пересчёт трансферов. Сейчас доступны `none` (по умолчанию: поиск рейсов отвечает 503) и `fake` (тестовый
   поставщик в памяти, только для разработки).
-- **Отправка уведомлений** через бота раз в 5 секунд. Строки `notifications` создаются при commit изменений;
-  воркер отправляет их и ставит `sent`, `skipped` (пользователь не писал боту или заблокировал его) или,
-  после 8 неудач, `failed`. Воркеру нужны `BOT_TOKEN`, `BOT_USERNAME` и, если ВМ не видит Telegram,
-  `TELEGRAM_RELAY_URL` и `TELEGRAM_RELAY_SECRET` (`docs/telegram-relay.md`). Без настоящего `BOT_TOKEN` воркер работает, но уведомления не
-  отправляет. Метрика —
-  `ft_notifications_total{kind,outcome}`.
+- **Отправка уведомлений** через бота раз в 5 секунд. Строки `notifications` создаются при commit изменений.
+  На человека в группе есть не больше одной неотправленной строки (`pending`): новое событие склеивается в
+  неё (другой вид события даёт общий текст «несколько изменений»). Новая строка ждёт 30 секунд, чтобы частые
+  изменения склеились, а после 6 сообщений за час человеку по одной группе следующая откладывается до выхода
+  самого раннего из окна часа (`docs/spec-mvp.md`, M-04a). Воркер арендует строку (`sending`) и ставит `sent`,
+  `skipped` (пользователь не писал боту или заблокировал его) или, после 8 неудач, `failed`; повтор после
+  ошибки остаётся в `sending` с паузой. Воркеру нужны `BOT_TOKEN`, `BOT_USERNAME` и, если ВМ не видит Telegram,
+  `TELEGRAM_RELAY_URL` и `TELEGRAM_RELAY_SECRET` (`docs/telegram-relay.md`). Без настоящего `BOT_TOKEN` воркер
+  работает, но уведомления не отправляет. Метрики — `ft_notifications_total{kind,outcome}` и
+  `ft_notifications_planned_total{outcome}` (`created`, `merged`, `deferred`).
 - **Удаление данных** раз в час, только при `RETENTION_ENABLED=true`. Группа удаляется целиком через 7 суток
   после самого позднего из моментов: конец дня `ends_on`, последняя отметка «Уехал», создание и последняя
   правка группы. Удаление необратимо; пользователи
@@ -121,7 +125,8 @@ UPDATE background_jobs SET status = 'pending', attempts = 0, run_after = now() W
 ```sql
 SELECT status, count(*) FROM notifications GROUP BY status;
 SELECT id, kind, attempts, last_error FROM notifications WHERE status = 'failed' ORDER BY id DESC LIMIT 20;
-UPDATE notifications SET status = 'pending', attempts = 0, run_after = now() WHERE id = ...;
+-- вернуть в отправку: через sending, чтобы не столкнуться с новой pending того же человека
+UPDATE notifications SET status = 'sending', attempts = 0, run_after = now() WHERE id = ...;
 ```
 
 Остановка по SIGTERM или Ctrl+C: текущее задание доводится до конца, затем процесс выходит. Несколько

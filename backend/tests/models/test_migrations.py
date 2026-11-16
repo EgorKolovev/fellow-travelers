@@ -185,6 +185,103 @@ async def test_0007_adds_and_drops_departed_from_transfer_without_fk(
         await db_engine.dispose()
 
 
+async def _insert_notification(
+    engine: AsyncEngine, user_id: uuid.UUID, event_id: uuid.UUID, key: str, **columns: str
+) -> int:
+    values = {"kind": "transfer_changed", "status": "pending", **columns}
+    async with engine.begin() as connection:
+        return int(
+            await connection.scalar(
+                text(
+                    "INSERT INTO notifications"
+                    " (user_id, event_id, kind, payload, dedupe_key, status)"
+                    " VALUES (:u, :e, :kind, '{}', :key, :status) RETURNING id"
+                ),
+                {"u": user_id, "e": event_id, "key": key, **values},
+            )
+            or 0
+        )
+
+
+async def _notification_states(engine: AsyncEngine) -> list[tuple[int, str, str, str | None]]:
+    async with engine.connect() as connection:
+        rows = await connection.execute(
+            text("SELECT id, status, kind, last_error FROM notifications ORDER BY id")
+        )
+        return [tuple(row) for row in rows]
+
+
+async def test_0009_coalesces_existing_duplicates_and_downgrade_restores_old_values(
+    db_engine: AsyncEngine, migrated_database: str
+) -> None:
+    async with AsyncSession(db_engine) as session:
+        event = await make_event(session)
+        other_event = await make_event(session)
+        user = await make_user(session)
+        other_user = await make_user(session)
+        ids = (event.id, other_event.id, user.id, other_user.id)
+        await session.commit()
+    event_id, other_event_id, user_id, other_user_id = ids
+    try:
+        # Given: схема 0008, двое `pending` у одного человека в группе, остальное не дубли
+        await asyncio.to_thread(command.downgrade, alembic_config(), "0008")
+        await db_engine.dispose()
+        first = await _insert_notification(db_engine, user_id, event_id, "a")
+        second = await _insert_notification(db_engine, user_id, event_id, "b")
+        third = await _insert_notification(db_engine, user_id, event_id, "c")
+        sent = await _insert_notification(db_engine, user_id, event_id, "d", status="sent")
+        elsewhere = await _insert_notification(db_engine, user_id, other_event_id, "e")
+        someone = await _insert_notification(db_engine, other_user_id, event_id, "f")
+
+        # When: upgrade до 0009
+        await asyncio.to_thread(command.upgrade, alembic_config(), "head")
+        await db_engine.dispose()
+
+        # Then: у человека в группе одна `pending` (самая ранняя), лишние `skipped`
+        states = {row[0]: row[1:] for row in await _notification_states(db_engine)}
+        assert states[first][0] == "pending"
+        assert states[second] == ("skipped", "transfer_changed", "Coalesced")
+        assert states[third][0] == "skipped"
+        assert states[sent][0] == "sent"
+        assert states[elsewhere][0] == states[someone][0] == "pending"
+        with pytest.raises(Exception, match="uq_notifications_user_event_pending"):
+            await _insert_notification(db_engine, user_id, event_id, "g")
+        # новые значения допустимы, `sending` не мешает новой `pending`
+        sending = await _insert_notification(
+            db_engine, other_user_id, other_event_id, "h", status="sending", kind="several_changes"
+        )
+        await _insert_notification(db_engine, other_user_id, other_event_id, "i")
+
+        # When: откат до 0008
+        await asyncio.to_thread(command.downgrade, alembic_config(), "0008")
+        await db_engine.dispose()
+
+        # Then: `sending` -> `pending`, `several_changes` -> `transfer_changed`
+        states = {row[0]: row[1:] for row in await _notification_states(db_engine)}
+        assert states[sending][:2] == ("pending", "transfer_changed")
+        with pytest.raises(Exception, match="ck_notifications_notification_status"):
+            await _insert_notification(db_engine, user_id, event_id, "j", status="sending")
+    finally:
+        async with db_engine.begin() as connection:
+            await connection.execute(
+                text("DELETE FROM notifications WHERE event_id IN (:a, :b)"),
+                {"a": event_id, "b": other_event_id},
+            )
+        await asyncio.to_thread(command.upgrade, alembic_config(), "head")
+        await db_engine.dispose()
+        async with AsyncSession(db_engine) as session:
+            await session.execute(
+                text("DELETE FROM events WHERE id IN (:a, :b)"),
+                {"a": event_id, "b": other_event_id},
+            )
+            await session.execute(
+                text("DELETE FROM users WHERE id IN (:a, :b)"), {"a": user_id, "b": other_user_id}
+            )
+            await session.commit()
+        await asyncio.to_thread(migrate_from_scratch, migrated_database)
+        await db_engine.dispose()
+
+
 README = Path(__file__).resolve().parents[2] / "README.md"
 
 

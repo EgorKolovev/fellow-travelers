@@ -5,6 +5,7 @@
 `plan_notifications` берёт накопленные записи, строит по ним сообщения и вставляет их в ту же
 транзакцию. Так ни одна точка изменения не пропущена, а откат изменения уносит и сообщения.
 Прямой вызов `notify` нужен только там, где записи истории нет (правка точек группы).
+Оба пути пишут через `notification_store`: склейка, задержка, часовой лимит.
 
 Планировщик синхронный: `before_commit` вызывается внутри greenlet асинхронной сессии, поэтому
 обработчик может пользоваться обычным `Session.execute` и `Session.flush`.
@@ -22,7 +23,6 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session, SessionTransaction
 
@@ -32,12 +32,12 @@ from app.models import (
     AuditAction,
     AuditLog,
     AuditReason,
-    Notification,
     NotificationKind,
     Trip,
     TripStatus,
 )
 from app.services.audit import PENDING_KEY, iso
+from app.services.notification_store import NewNotification, store, store_async
 
 # Д10: порог сдвига расчётного прибытия
 ARRIVAL_THRESHOLD = timedelta(minutes=15)
@@ -51,8 +51,6 @@ _PRIORITY = (
     NotificationKind.FLIGHT_CHANGED,
 )
 _RANK = {kind: rank for rank, kind in enumerate(_PRIORITY)}
-
-_CONFLICT_COLUMNS = ["user_id", "dedupe_key"]
 
 # `payload.role` у `flight_changed`: чей это рейс для адресата
 _ROLE_PASSENGER = "passenger"
@@ -69,31 +67,6 @@ class _Candidate:
 _Drafts = dict[tuple[uuid.UUID, uuid.UUID], list[_Candidate]]
 
 
-def _insert_ignoring_duplicates(rows: list[dict[str, Any]]) -> Any:
-    return (
-        pg_insert(Notification)
-        .values(rows)
-        .on_conflict_do_nothing(index_elements=_CONFLICT_COLUMNS)
-    )
-
-
-def _row(
-    *,
-    user_id: uuid.UUID,
-    event_id: uuid.UUID,
-    kind: NotificationKind,
-    payload: Mapping[str, Any],
-    dedupe_key: str,
-) -> dict[str, Any]:
-    return {
-        "user_id": user_id,
-        "event_id": event_id,
-        "kind": kind,
-        "payload": dict(payload),
-        "dedupe_key": dedupe_key,
-    }
-
-
 async def notify(
     session: AsyncSession,
     *,
@@ -106,19 +79,11 @@ async def notify(
     """Добавляет сообщение в текущую транзакцию: без commit, повтор с тем же ключом игнорируется.
 
     Для изменений без записи истории (`points_changed`); остальное строит `plan_notifications`.
+    Склейка, задержка и часовой лимит — `app.services.notification_store`.
     """
-    await session.execute(
-        _insert_ignoring_duplicates(
-            [
-                _row(
-                    user_id=user_id,
-                    event_id=event_id,
-                    kind=kind,
-                    payload=payload,
-                    dedupe_key=dedupe_key,
-                )
-            ]
-        )
+    await store_async(
+        session,
+        [NewNotification(user_id, event_id, kind, dict(payload), dedupe_key)],
     )
 
 
@@ -131,13 +96,14 @@ async def notify_many(
     payload: Mapping[str, Any],
     dedupe_key: str,
 ) -> None:
-    """Одно сообщение каждому из `user_ids` одним INSERT; семантика та же, что у `notify`."""
-    rows = [
-        _row(user_id=u, event_id=event_id, kind=kind, payload=payload, dedupe_key=dedupe_key)
-        for u in user_ids
-    ]
-    if rows:
-        await session.execute(_insert_ignoring_duplicates(rows))
+    """Одно сообщение каждому из `user_ids` пачкой; семантика та же, что у `notify`."""
+    await store_async(
+        session,
+        [
+            NewNotification(user_id, event_id, kind, dict(payload), dedupe_key)
+            for user_id in dict.fromkeys(user_ids)
+        ],
+    )
 
 
 class _Planner:
@@ -324,12 +290,12 @@ class _Planner:
     # ----------------------------------------------------------------- запись
 
     def _store(self) -> None:
-        rows = []
+        items = []
         for (event_id, user_id), candidates in self.drafts.items():
             chosen = min(candidates, key=lambda c: (_RANK[c.kind], c.audit_id))
             first_id = min(c.audit_id for c in candidates)
-            rows.append(
-                _row(
+            items.append(
+                NewNotification(
                     user_id=user_id,
                     event_id=event_id,
                     kind=chosen.kind,
@@ -337,8 +303,8 @@ class _Planner:
                     dedupe_key=f"{chosen.kind.value}:{first_id}",
                 )
             )
-        if rows:
-            self.session.execute(_insert_ignoring_duplicates(rows))
+        if items:
+            store(self.session, items)
 
 
 def plan_notifications(session: Session) -> None:

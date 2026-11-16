@@ -18,6 +18,7 @@ from app.models import (
 )
 from app.schemas.event import DATES_ORDER_MESSAGE, EventCreate, EventUpdate
 from app.services.audit import iso
+from app.services.matching import lock_event
 from app.services.notifications import notify_many
 
 INVITE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
@@ -131,6 +132,14 @@ async def _notify_points_changed(session: AsyncSession, event: Event, author: Us
 async def update_event(
     session: AsyncSession, event: Event, data: EventUpdate, author: User
 ) -> Event:
+    """Правка группы админом; точки группы уведомляют участников.
+
+    Берёт блокировку группы первой, как сценарии подбора: строки `notifications` одной группы
+    пишут по очереди, иначе параллельная склейка тех же `pending` могла бы дать взаимоблокировку.
+    Группу, прочитанную до блокировки, перечитываем после неё.
+    """
+    await lock_event(session, event.id)
+    await session.refresh(event)
     changes = {name: getattr(data, name) for name in data.model_fields_set}
     starts_on: date = changes.get("starts_on", event.starts_on)
     ends_on: date = changes.get("ends_on", event.ends_on)

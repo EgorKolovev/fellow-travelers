@@ -51,5 +51,7 @@ def render(
             return (
                 f"{flight}: новое расчётное прибытие {format_arrival(arrival_local)} — «{title}»."
             )
+        case NotificationKind.SEVERAL_CHANGES:
+            return f"В поездке «{title}» несколько изменений. Откройте поездку, чтобы посмотреть."
         case NotificationKind.FLIGHT_CANCELLED:
             return f"{flight} отменён — «{title}». Выберите другой рейс в заявке."

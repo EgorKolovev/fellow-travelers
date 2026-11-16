@@ -15,8 +15,10 @@ class Notification(Base):
 
     `payload` хранит только белый список (идентификаторы, статус, время прибытия): телефонов и
     имён в нём нет, текст собирается при отправке. Пара `(user_id, dedupe_key)` уникальна, повтор
-    с тем же ключом не создаёт второе сообщение. Воркер берёт `pending` с `run_after <= now()`;
-    в `last_error` только имя класса ошибки. Строки уходят вместе с группой и с пользователем.
+    с тем же ключом не создаёт второе сообщение. У человека в группе не больше одной `pending`
+    (частичный индекс), новые события склеиваются в неё (M-04a). Воркер берёт `pending` и `sending`
+    с `run_after <= now()` и ставит `sending` (аренда, она же пауза повтора); в `last_error` только
+    имя класса ошибки. Строки уходят вместе с группой и с пользователем.
     """
 
     __tablename__ = "notifications"
@@ -24,6 +26,16 @@ class Notification(Base):
         Index("uq_notifications_user_id_dedupe_key", "user_id", "dedupe_key", unique=True),
         Index("ix_notifications_status_run_after", "status", "run_after"),
         Index("ix_notifications_event_id", "event_id"),
+        # не больше одной неотправленной строки на человека в группе: новое событие склеивается
+        Index(
+            "uq_notifications_user_event_pending",
+            "user_id",
+            "event_id",
+            unique=True,
+            postgresql_where=text("status = 'pending'"),
+        ),
+        # подсчёт часового лимита
+        Index("ix_notifications_user_event_created", "user_id", "event_id", "created_at"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
