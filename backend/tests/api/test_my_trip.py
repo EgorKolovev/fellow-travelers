@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime, timedelta
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from httpx import AsyncClient, Response
@@ -90,7 +91,7 @@ async def test_member_without_application(api_client: AsyncClient, event: Event)
     assert data["taxi"] == {
         "from": {"address": "Терминал D", "lat": 55.97, "lon": 37.41},
         "to": {"address": "Отель", "lat": 55.75, "lon": 37.62},
-        "yandex_go_url": None,
+        "yandex_go_url": data["taxi"]["yandex_go_url"],
     }
 
 
@@ -115,6 +116,59 @@ async def test_searching_has_no_transfer(
 
     assert data["application"]["status"] == "searching"
     assert data["transfer"] is None
+    assert data["taxi"]["yandex_go_url"] is not None
+
+
+# ---------------------------------------------------------------- ссылки
+
+
+async def test_links_filled_with_coordinates(api_client: AsyncClient, event: Event) -> None:
+    data = (await get_trip(api_client, event.id)).json()
+
+    assert data["meeting_map_url"] == "https://yandex.ru/maps/?pt=37.41,55.97&z=17&l=map"
+    go = urlsplit(data["taxi"]["yandex_go_url"])
+    assert go.netloc == "3.redirect.appmetrica.yandex.com"
+    q = parse_qs(go.query)
+    # посадка не задана — берётся место сбора
+    assert (q["start-lat"], q["start-lon"]) == (["55.97"], ["37.41"])
+    assert (q["end-lat"], q["end-lon"]) == (["55.75"], ["37.62"])
+
+
+async def test_links_use_pickup_point(
+    api_client: AsyncClient, db_session: AsyncSession, event: Event
+) -> None:
+    event.pickup_point = {"address": "Парковка P1", "lat": 55.9, "lon": 37.4}
+    await db_session.flush()
+
+    data = (await get_trip(api_client, event.id)).json()
+
+    q = parse_qs(urlsplit(data["taxi"]["yandex_go_url"]).query)
+    assert (q["start-lat"], q["start-lon"]) == (["55.9"], ["37.4"])
+    assert data["meeting_map_url"] == "https://yandex.ru/maps/?pt=37.41,55.97&z=17&l=map"
+
+
+async def test_links_null_without_coordinates(
+    api_client: AsyncClient, db_session: AsyncSession, event: Event
+) -> None:
+    event.meeting_point = {"address": "Терминал D", "lat": None, "lon": None}
+    event.destination = {"address": "Отель", "lat": None, "lon": None}
+    await db_session.flush()
+
+    data = (await get_trip(api_client, event.id)).json()
+
+    assert data["meeting_map_url"] is None
+    assert data["taxi"]["yandex_go_url"] is None
+
+
+async def test_go_link_null_if_destination_has_no_coordinates(
+    api_client: AsyncClient, db_session: AsyncSession, event: Event
+) -> None:
+    event.destination = {"address": "Отель", "lat": None, "lon": None}
+    await db_session.flush()
+
+    data = (await get_trip(api_client, event.id)).json()
+
+    assert data["meeting_map_url"] is not None
     assert data["taxi"]["yandex_go_url"] is None
 
 

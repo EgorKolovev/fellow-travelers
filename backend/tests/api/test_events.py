@@ -86,6 +86,10 @@ async def test_create_event_with_pickup_point_and_chat(api_client: AsyncClient, 
         ({"ends_on": "2026-11-11"}, "ends_on"),
         ({"meeting_point": {"address": "A", "lat": 55.0}}, "meeting_point"),
         ({"meeting_point": {"address": "A", "lat": 91, "lon": 0}}, "meeting_point.lat"),
+        ({"meeting_point": {"address": "A", "lon": 37.0}}, "meeting_point"),
+        ({"meeting_point": {"address": "A", "lat": 0, "lon": 181}}, "meeting_point.lon"),
+        ({"destination": {"address": "A", "lat": -91, "lon": 0}}, "destination.lat"),
+        ({"pickup_point": {"address": "A", "lat": 1}}, "pickup_point"),
         ({"surprise": 1}, "surprise"),
         ({"chat_url": "ftp://example.com/x"}, "chat_url"),
         ({"chat_url": "https://t.me/" + "a" * 200}, "chat_url"),
@@ -556,3 +560,26 @@ async def test_invite_for_stranger_is_404(
 
     assert response.status_code == 404
     assert_contract(response, "GET", "/events/{event_id}/invite")
+
+
+@pytest.mark.parametrize(
+    "point",
+    [
+        {"address": "A", "lat": 55.0},
+        {"address": "A", "lon": 37.0},
+        {"address": "A", "lat": 90.5, "lon": 0},
+        {"address": "A", "lat": 0, "lon": -180.5},
+    ],
+)
+async def test_patch_rejects_bad_coordinates(
+    api_client: AsyncClient, db_session: AsyncSession, user: User, point: dict[str, Any]
+) -> None:
+    event = await make_event(db_session, admin_id=user.id)
+
+    response = await api_client.patch(
+        f"/events/{event.id}", json={"meeting_point": point}, headers=auth_headers()
+    )
+
+    assert response.status_code == 422
+    assert_contract(response, "PATCH", "/events/{event_id}")
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
